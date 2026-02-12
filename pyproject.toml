@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rocksmith-tutor"
+version = "0.1.0"
+description = "Bass learning curriculum generator from Rocksmith CDLC"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.0",
+    "rich>=13.0",
+    "anthropic>=0.40",
+    "pyyaml>=6.0",
+    "rocksmith",
+]
+
+[project.scripts]
+rocksmith-tutor = "rocksmith_tutor.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["rocksmith_tutor*"]
