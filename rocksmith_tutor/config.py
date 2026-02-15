@@ -23,7 +23,4 @@ else:
         Path.home() / "nasty" / "music" / "Rocksmith_CDLC" / "unverified",
     ]
 
-JELLYFIN_URL = os.environ.get("JELLYFIN_URL", "http://10.0.1.201:8096")
-JELLYFIN_API_KEY = os.environ.get("JELLYFIN_API_KEY", "")
-
 DEFAULT_MODEL = "claude-sonnet-4-20250514"

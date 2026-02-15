@@ -10,8 +10,8 @@ from rich.console import Console
 from rich.table import Table
 
 from .catalog import Catalog
-from .config import CATALOG_PATH, CURRICULUM_PATH, DATA_DIR, DEFAULT_PSARC_DIRS, DEFAULT_MODEL
-from .techniques import MANIFEST_TECHNIQUES, TECHNIQUE_DISPLAY_NAMES
+from .config import CATALOG_PATH, CURRICULUM_PATH, DEFAULT_PSARC_DIRS, DEFAULT_MODEL
+from .techniques import MANIFEST_TECHNIQUES
 
 console = Console()
 
@@ -207,21 +207,3 @@ def ask(question: str | None, model: str | None) -> None:
     interactive_ask(cat, question=question, model=model)
 
 
-@cli.command()
-@click.argument("lesson_id")
-@click.option("--jellyfin-url", envvar="JELLYFIN_URL", help="Jellyfin server URL")
-@click.option("--jellyfin-key", envvar="JELLYFIN_API_KEY", help="Jellyfin API key")
-def playlist(lesson_id: str, jellyfin_url: str | None, jellyfin_key: str | None) -> None:
-    """Create a Jellyfin playlist from a lesson's exercises."""
-    from .curriculum import Curriculum
-    from .jellyfin import create_lesson_playlist
-
-    curr = Curriculum.load()
-    # Find the lesson across all modules
-    for mod in curr.modules:
-        for les in mod.lessons:
-            if les.id == lesson_id:
-                create_lesson_playlist(les, jellyfin_url=jellyfin_url, api_key=jellyfin_key)
-                return
-
-    console.print(f"[red]Lesson not found:[/] {lesson_id}")
