@@ -12,6 +12,7 @@ dependencies = [
     "rich>=13.0",
     "anthropic>=0.40",
     "pyyaml>=6.0",
+    "cryptography>=41.0",
     "rocksmith",
 ]
 

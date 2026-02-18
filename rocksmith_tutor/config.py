@@ -11,13 +11,20 @@ DATA_DIR = Path(os.environ.get(
 
 CATALOG_PATH = DATA_DIR / "catalog.json"
 CURRICULUM_PATH = DATA_DIR / "curriculum.yaml"
+ID_MAP_PATH = DATA_DIR / "id_map.json"
+
+ROCKSMITH_APP_ID = "221680"
 
 if platform.system() == "Darwin":
+    _STEAM_USERDATA = (
+        Path.home() / "Library" / "Application Support" / "Steam" / "userdata"
+    )
     DEFAULT_PSARC_DIRS = [
         Path.home() / "Library" / "Application Support" / "Steam"
         / "steamapps" / "common" / "Rocksmith2014" / "dlc",
     ]
 else:
+    _STEAM_USERDATA = Path.home() / ".local" / "share" / "Steam" / "userdata"
     DEFAULT_PSARC_DIRS = [
         Path.home() / "nasty" / "music" / "Rocksmith_CDLC" / "verified",
         Path.home() / "nasty" / "music" / "Rocksmith_CDLC" / "unverified",

@@ -45,6 +45,36 @@ def _extract_bass_manifest(content: dict[str, bytes]) -> tuple[str, dict] | None
     return None
 
 
+def extract_id_map_from_psarc(psarc_path: Path) -> dict[str, str]:
+    """Extract PersistentID -> song_id mapping from a PSARC's bass manifests.
+
+    The profile save file keys Songs/SongsSA by PersistentID, but the catalog
+    is keyed by song_id (FullName). This bridge is needed for recommendations.
+    """
+    id_map: dict[str, str] = {}
+    with open(psarc_path, "rb") as f:
+        content = PSARC(crypto=True).parse_stream(f)
+
+    if content is None:
+        return id_map
+
+    for key in content:
+        if key.startswith("manifests/") and key.endswith("_bass.json"):
+            try:
+                manifest = json.loads(content[key])
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            entries = manifest.get("Entries", {})
+            for persistent_id, entry_val in entries.items():
+                attrs = entry_val.get("Attributes", {})
+                if attrs:
+                    dlc_key = attrs.get("DLCKey", "")
+                    full_name = attrs.get("FullName", "")
+                    song_id = full_name.lower() if full_name else f"{dlc_key}_Bass".lower()
+                    id_map[persistent_id.upper()] = song_id
+    return id_map
+
+
 def _attrs_to_song_entry(attrs: dict, psarc_path: Path, mtime: float) -> SongEntry:
     """Build a SongEntry from manifest Attributes."""
     ap = attrs.get("ArrangementProperties", {})

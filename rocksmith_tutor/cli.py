@@ -11,7 +11,10 @@ from rich.table import Table
 
 from .catalog import Catalog
 from .config import CATALOG_PATH, CURRICULUM_PATH, DEFAULT_PSARC_DIRS, DEFAULT_MODEL
+from .recommend import Zone
 from .techniques import MANIFEST_TECHNIQUES
+
+ZONE_NAMES = [z.value for z in Zone]
 
 console = Console()
 
@@ -205,5 +208,149 @@ def ask(question: str | None, model: str | None) -> None:
         return
 
     interactive_ask(cat, question=question, model=model)
+
+
+@cli.command()
+@click.option("--count", "-n", default=20, help="Number of recommendations")
+@click.option(
+    "--zone", "-z", "zone_name",
+    type=click.Choice(ZONE_NAMES, case_sensitive=False),
+    help="Filter to a specific zone",
+)
+@click.option("--technique", "-t", help="Filter by technique name")
+@click.option(
+    "--profile", "profile_path",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to *_PRFLDB save file (auto-detected if omitted)",
+)
+@click.option(
+    "--dir", "dirs", multiple=True, type=click.Path(exists=True, path_type=Path),
+    help="PSARC directories for ID map (uses defaults if omitted)",
+)
+def recommend(
+    count: int,
+    zone_name: str | None,
+    technique: str | None,
+    profile_path: Path | None,
+    dirs: tuple[Path, ...],
+) -> None:
+    """Recommend songs slightly harder than what you can play."""
+    from .profile import (
+        find_profile_path,
+        decrypt_profile,
+        load_or_build_id_map,
+        parse_profile,
+    )
+    from .recommend import get_recommendations, Zone
+    from .scanner import scan_psarcs
+
+    # Validate technique
+    if technique and technique not in MANIFEST_TECHNIQUES:
+        console.print(f"[red]Unknown technique:[/] {technique}")
+        console.print(f"Available: {', '.join(MANIFEST_TECHNIQUES)}")
+        return
+
+    # Load or auto-scan catalog
+    cat = Catalog.load()
+    if not cat.songs:
+        console.print("[yellow]No catalog found, running scan...[/]")
+        scan_dirs = list(dirs) if dirs else DEFAULT_PSARC_DIRS
+        cat = scan_psarcs(dirs=scan_dirs)
+        cat.save()
+        console.print(f"[green]Catalog built:[/] {cat.bass_song_count} bass songs")
+
+    # Find profile save file
+    if profile_path is None:
+        profile_path = find_profile_path()
+        if profile_path is None:
+            console.print(
+                "[red]No PRFLDB save file found.[/] "
+                "Use --profile to specify the path."
+            )
+            return
+    console.print(f"[dim]Profile: {profile_path}[/]")
+
+    # Build/load ID map
+    psarc_dirs = list(dirs) if dirs else DEFAULT_PSARC_DIRS
+    id_map = load_or_build_id_map(psarc_dirs=psarc_dirs)
+    if not id_map:
+        console.print("[red]No ID map could be built. Are PSARC dirs correct?[/]")
+        return
+    console.print(f"[dim]ID map: {len(id_map)} entries[/]")
+
+    # Decrypt and parse profile
+    try:
+        profile_json = decrypt_profile(profile_path)
+    except Exception as e:
+        console.print(f"[red]Failed to decrypt profile:[/] {e}")
+        return
+
+    player = parse_profile(profile_json, id_map)
+    console.print(
+        f"[dim]Profile: {len(player.songs)} songs tracked, "
+        f"{len(player.competent_song_ids)} competent, "
+        f"{len(player.played_song_ids)} played[/]"
+    )
+
+    # Resolve zone filter
+    zone_filter: Zone | None = None
+    if zone_name:
+        zone_filter = Zone(zone_name)
+
+    # Get recommendations
+    ceiling, bounds, recs = get_recommendations(
+        catalog=cat,
+        profile=player,
+        count=count,
+        zone_filter=zone_filter,
+        technique_filter=technique,
+    )
+
+    # Display comfort zone info
+    console.print(f"\n[bold]Comfort ceiling:[/] {ceiling:.3f}")
+    for zone, zb in bounds.items():
+        console.print(f"  {zone.value:>10s}: {zb.lo:.3f} – {zb.hi:.3f}")
+
+    if not recs:
+        console.print("\n[yellow]No recommendations match the filters.[/]")
+        return
+
+    # Build table
+    zone_styles = {
+        Zone.WARMUP: "green",
+        Zone.GROWTH: "cyan",
+        Zone.CHALLENGE: "yellow",
+        Zone.REACH: "red",
+    }
+
+    table = Table(title=f"Recommendations ({len(recs)} songs)")
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Zone", style="bold")
+    table.add_column("Artist", style="cyan")
+    table.add_column("Song", style="white")
+    table.add_column("Diff", justify="right")
+    table.add_column("BPM", justify="right")
+    table.add_column("Plays", justify="right")
+    table.add_column("Techniques", style="dim")
+
+    for i, rec in enumerate(recs, 1):
+        s = rec.song
+        style = zone_styles.get(rec.zone, "white")
+        techs = ", ".join(s.technique_list()[:3])
+        if len(s.technique_list()) > 3:
+            techs += f" +{len(s.technique_list()) - 3}"
+        table.add_row(
+            str(i),
+            f"[{style}]{rec.zone.value}[/{style}]",
+            s.artist,
+            s.song_name,
+            f"{s.difficulty_hard:.3f}",
+            f"{s.tempo:.0f}",
+            str(rec.play_count) if rec.play_count > 0 else "-",
+            techs,
+        )
+
+    console.print()
+    console.print(table)
 
 
