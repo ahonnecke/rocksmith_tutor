@@ -48,6 +48,7 @@ class Recommendation:
     zone: Zone
     play_count: int
     score: tuple  # sort key
+    teaching_note: str = ""
 
 
 def _clamp(v: float) -> float:

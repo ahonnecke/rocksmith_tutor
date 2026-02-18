@@ -31,3 +31,6 @@ else:
     ]
 
 DEFAULT_MODEL = "claude-sonnet-4-20250514"
+DEFAULT_ENRICH_MODEL = "claude-haiku-4-5-20251001"
+
+TEACHING_NOTES_PATH = DATA_DIR / "teaching_notes.json"

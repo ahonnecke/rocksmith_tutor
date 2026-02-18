@@ -10,7 +10,10 @@ from rich.console import Console
 from rich.table import Table
 
 from .catalog import Catalog
-from .config import CATALOG_PATH, CURRICULUM_PATH, DEFAULT_PSARC_DIRS, DEFAULT_MODEL
+from .config import (
+    CATALOG_PATH, CURRICULUM_PATH, DEFAULT_PSARC_DIRS, DEFAULT_MODEL,
+    DEFAULT_ENRICH_MODEL, TEACHING_NOTES_PATH,
+)
 from .recommend import Zone
 from .techniques import MANIFEST_TECHNIQUES
 
@@ -297,6 +300,13 @@ def recommend(
     if zone_name:
         zone_filter = Zone(zone_name)
 
+    # Load teaching notes if available
+    from .teaching import TeachingNotesStore
+    notes_store = TeachingNotesStore.load()
+    has_notes = bool(notes_store.notes)
+    if has_notes:
+        console.print(f"[dim]Teaching notes: {len(notes_store.notes)} entries[/]")
+
     # Get recommendations
     ceiling, bounds, recs = get_recommendations(
         catalog=cat,
@@ -305,6 +315,11 @@ def recommend(
         zone_filter=zone_filter,
         technique_filter=technique,
     )
+
+    # Attach teaching notes to recommendations
+    if has_notes:
+        for rec in recs:
+            rec.teaching_note = notes_store.display_text(rec.song.song_id)
 
     # Display comfort zone info
     console.print(f"\n[bold]Comfort ceiling:[/] {ceiling:.3f}")
@@ -332,6 +347,8 @@ def recommend(
     table.add_column("BPM", justify="right")
     table.add_column("Plays", justify="right")
     table.add_column("Techniques", style="dim")
+    if has_notes:
+        table.add_column("Why", style="italic", max_width=60)
 
     for i, rec in enumerate(recs, 1):
         s = rec.song
@@ -339,7 +356,7 @@ def recommend(
         techs = ", ".join(s.technique_list()[:3])
         if len(s.technique_list()) > 3:
             techs += f" +{len(s.technique_list()) - 3}"
-        table.add_row(
+        row = [
             str(i),
             f"[{style}]{rec.zone.value}[/{style}]",
             s.artist,
@@ -348,9 +365,36 @@ def recommend(
             f"{s.tempo:.0f}",
             str(rec.play_count) if rec.play_count > 0 else "-",
             techs,
-        )
+        ]
+        if has_notes:
+            row.append(rec.teaching_note or "")
+        table.add_row(*row)
 
     console.print()
     console.print(table)
 
 
+@cli.command()
+@click.option("--force", is_flag=True, help="Regenerate all notes (including LLM)")
+@click.option(
+    "--model", default=None,
+    help=f"LLM model override (default: {DEFAULT_ENRICH_MODEL})",
+)
+@click.option("--batch-size", default=40, help="Songs per LLM call (default: 40)")
+@click.option("--skip-llm", is_flag=True, help="Only compute template layer (no API cost)")
+def enrich(force: bool, model: str | None, batch_size: int, skip_llm: bool) -> None:
+    """Add teaching context to songs (template metadata + LLM descriptions)."""
+    from .teaching import enrich_catalog
+
+    cat = Catalog.load()
+    if not cat.songs:
+        console.print("[yellow]No catalog found. Run 'rocksmith-tutor scan' first.[/]")
+        return
+
+    enrich_catalog(
+        catalog=cat,
+        force=force,
+        skip_llm=skip_llm,
+        model=model,
+        batch_size=batch_size,
+    )
