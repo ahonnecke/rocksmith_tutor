@@ -1,5 +1,7 @@
 # Rocksmith Bass Tutor
 
+<img width="1459" height="833" alt="image" src="https://github.com/user-attachments/assets/b5732838-3777-417d-bf53-e9e81c8abeff" />
+
 Bass learning curriculum generated from your Rocksmith CDLC library.
 
 ## On this machine (rocksmithytoo)
