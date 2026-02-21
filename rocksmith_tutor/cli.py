@@ -375,6 +375,146 @@ def recommend(
 
 
 @cli.command()
+@click.option("--count", "-n", default=20, help="Number of songs to show")
+@click.option("--technique", "-t", help="Filter by technique name")
+@click.option(
+    "--profile", "profile_path",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to *_PRFLDB save file (auto-detected if omitted)",
+)
+@click.option(
+    "--dir", "dirs", multiple=True, type=click.Path(exists=True, path_type=Path),
+    help="PSARC directories for ID map (uses defaults if omitted)",
+)
+def refine(
+    count: int,
+    technique: str | None,
+    profile_path: Path | None,
+    dirs: tuple[Path, ...],
+) -> None:
+    """Songs you can play — focus on tone, clarity, and feel."""
+    from .profile import (
+        find_profile_path,
+        decrypt_profile,
+        load_or_build_id_map,
+        parse_profile,
+    )
+    from .recommend import get_refinement_picks
+    from .scanner import scan_psarcs
+
+    # Validate technique
+    if technique and technique not in MANIFEST_TECHNIQUES:
+        console.print(f"[red]Unknown technique:[/] {technique}")
+        console.print(f"Available: {', '.join(MANIFEST_TECHNIQUES)}")
+        return
+
+    # Load or auto-scan catalog
+    cat = Catalog.load()
+    if not cat.songs:
+        console.print("[yellow]No catalog found, running scan...[/]")
+        scan_dirs = list(dirs) if dirs else DEFAULT_PSARC_DIRS
+        cat = scan_psarcs(dirs=scan_dirs)
+        cat.save()
+        console.print(f"[green]Catalog built:[/] {cat.bass_song_count} bass songs")
+
+    # Find profile save file
+    if profile_path is None:
+        profile_path = find_profile_path()
+        if profile_path is None:
+            console.print(
+                "[red]No PRFLDB save file found.[/] "
+                "Use --profile to specify the path."
+            )
+            return
+    console.print(f"[dim]Profile: {profile_path}[/]")
+
+    # Build/load ID map
+    psarc_dirs = list(dirs) if dirs else DEFAULT_PSARC_DIRS
+    id_map = load_or_build_id_map(psarc_dirs=psarc_dirs)
+    if not id_map:
+        console.print("[red]No ID map could be built. Are PSARC dirs correct?[/]")
+        return
+    console.print(f"[dim]ID map: {len(id_map)} entries[/]")
+
+    # Decrypt and parse profile
+    try:
+        profile_json = decrypt_profile(profile_path)
+    except Exception as e:
+        console.print(f"[red]Failed to decrypt profile:[/] {e}")
+        return
+
+    player = parse_profile(profile_json, id_map)
+    console.print(
+        f"[dim]Profile: {len(player.songs)} songs tracked, "
+        f"{len(player.competent_song_ids)} competent, "
+        f"{len(player.played_song_ids)} played[/]"
+    )
+
+    # Load teaching notes if available
+    from .teaching import TeachingNotesStore
+    notes_store = TeachingNotesStore.load()
+    has_notes = bool(notes_store.notes)
+    if has_notes:
+        console.print(f"[dim]Teaching notes: {len(notes_store.notes)} entries[/]")
+
+    # Get refinement picks
+    ceiling, recs = get_refinement_picks(
+        catalog=cat,
+        profile=player,
+        count=count,
+        technique_filter=technique,
+    )
+
+    # Attach teaching notes
+    if has_notes:
+        for rec in recs:
+            rec.teaching_note = notes_store.display_text(rec.song.song_id)
+
+    # Display
+    console.print(f"\n[bold]Comfort ceiling:[/] {ceiling:.3f}")
+    console.print(
+        f"[dim]Showing songs at or below {ceiling:.3f} that you've played "
+        f"but not mastered — work on tone and clarity.[/]"
+    )
+
+    if not recs:
+        console.print("\n[yellow]No refinement picks match the filters.[/]")
+        return
+
+    table = Table(title=f"Refine ({len(recs)} songs)")
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Artist", style="cyan")
+    table.add_column("Song", style="white")
+    table.add_column("Diff", justify="right")
+    table.add_column("BPM", justify="right")
+    table.add_column("Plays", justify="right")
+    table.add_column("Techniques", style="dim")
+    if has_notes:
+        table.add_column("Why", style="italic", max_width=60)
+
+    for i, rec in enumerate(recs, 1):
+        s = rec.song
+        techs = ", ".join(s.technique_list()[:3])
+        if len(s.technique_list()) > 3:
+            techs += f" +{len(s.technique_list()) - 3}"
+        row = [
+            str(i),
+            s.artist,
+            s.song_name,
+            f"{s.difficulty_hard:.3f}",
+            f"{s.tempo:.0f}",
+            str(rec.play_count),
+            techs,
+        ]
+        if has_notes:
+            row.append(rec.teaching_note or "")
+        table.add_row(*row)
+
+    console.print()
+    console.print(table)
+
+
+@cli.command()
 @click.option("--force", is_flag=True, help="Regenerate all notes (including LLM)")
 @click.option(
     "--model", default=None,

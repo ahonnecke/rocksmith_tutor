@@ -186,3 +186,62 @@ def get_recommendations(
 
     recommendations.sort(key=lambda r: r.score)
     return ceiling, bounds, recommendations[:count]
+
+
+def get_refinement_picks(
+    catalog: Catalog,
+    profile: PlayerProfile,
+    count: int = 20,
+    technique_filter: str | None = None,
+) -> tuple[float, list[Recommendation]]:
+    """Find songs at or below your level for tone and clarity work.
+
+    These are songs you can play (below the comfort ceiling, played at
+    least once) but haven't mastered yet — the notes aren't the
+    challenge, so you can focus on how you sound.
+
+    Returns (ceiling, recommendations).
+    """
+    ceiling = compute_comfort_ceiling(catalog, profile)
+    mastered = set(profile.competent_song_ids)
+
+    recommendations: list[Recommendation] = []
+
+    for song in catalog.songs.values():
+        # Skip mastered songs — nothing left to refine
+        if song.song_id in mastered:
+            continue
+
+        # Must have been played (you need to know the song already)
+        progress = profile.get_by_song_id(song.song_id)
+        if not progress or progress.play_count == 0:
+            continue
+
+        diff = song.difficulty_hard
+
+        # Must be at or below the comfort ceiling
+        if diff > ceiling:
+            continue
+
+        # Technique filter
+        if technique_filter and not song.techniques.get(technique_filter):
+            continue
+
+        play_count = progress.play_count
+
+        # Sort key: closest to ceiling first (hardest songs you can
+        # handle), then fewest plays (most room to improve)
+        sort_key = (
+            -(diff),         # Higher difficulty first (negative for ascending sort)
+            play_count,      # Fewer plays = more room to improve
+        )
+
+        recommendations.append(Recommendation(
+            song=song,
+            zone=Zone.WARMUP,  # All refinement picks are in the comfort zone
+            play_count=play_count,
+            score=sort_key,
+        ))
+
+    recommendations.sort(key=lambda r: r.score)
+    return ceiling, recommendations[:count]
