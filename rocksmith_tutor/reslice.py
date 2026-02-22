@@ -605,37 +605,13 @@ def reslice_psarc(
     if dry_run:
         return boundaries
 
-    # Rebuild SNG
+    # Rebuild SNG — this is what Rocksmith uses for gameplay
     new_sng_bytes = rebuild_sng(sng, boundaries)
-    # Re-encrypt for PSARC (encrypt expects raw SNG, content dict has decrypted)
     content[sng_key] = new_sng_bytes
 
-    # Rebuild XML if present
-    xml_key = _find_bass_xml_key(content)
-    if xml_key is not None:
-        content[xml_key] = rebuild_xml(content[xml_key], boundaries)
-        log.info("Rebuilt XML: %s", xml_key)
-
-    # Rebuild manifest if present
-    manifest_key = _find_bass_manifest_key(content)
-    if manifest_key is not None:
-        # Build phrase dicts for manifest
-        phrase_names_seen: dict[str, int] = {}
-        manifest_phrases = []
-        for b in boundaries:
-            if b.name not in phrase_names_seen:
-                phrase_names_seen[b.name] = len(manifest_phrases)
-                manifest_phrases.append({
-                    "Name": b.name,
-                    "MaxDifficulty": 0,
-                    "Disparity": 0,
-                    "Ignore": b.name in ("COUNT", "END"),
-                    "Solo": False,
-                })
-        content[manifest_key] = rebuild_manifest(
-            content[manifest_key], boundaries, manifest_phrases,
-        )
-        log.info("Rebuilt manifest: %s", manifest_key)
+    # NOTE: XML and manifest are left untouched. Rocksmith reads the SNG
+    # for gameplay; the XML/manifest are only used by toolkit editors.
+    # Modifying the XML causes Rocksmith to reject the PSARC.
 
     # Write output PSARC
     with open(output_path, "wb") as f:
