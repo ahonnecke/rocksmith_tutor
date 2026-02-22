@@ -538,3 +538,150 @@ def enrich(force: bool, model: str | None, batch_size: int, skip_llm: bool) -> N
         model=model,
         batch_size=batch_size,
     )
+
+
+@cli.command()
+@click.argument("song_name", required=False)
+@click.option("--file", "file_path", type=click.Path(exists=True, path_type=Path),
+              help="Direct path to a .psarc file")
+@click.option("--min-segment", default=3.0, type=float,
+              help="Minimum segment duration in seconds (default: 3.0)")
+@click.option("--max-segment", default=15.0, type=float,
+              help="Maximum segment duration in seconds (default: 15.0)")
+@click.option("--window", default=2.0, type=float,
+              help="Density analysis window size in seconds (default: 2.0)")
+@click.option("--output", "-o", "output_path", type=click.Path(path_type=Path),
+              help="Output path (default: {stem}_resliced{suffix})")
+@click.option("--dry-run", is_flag=True,
+              help="Print before/after comparison, don't write")
+def reslice(
+    song_name: str | None,
+    file_path: Path | None,
+    min_segment: float,
+    max_segment: float,
+    window: float,
+    output_path: Path | None,
+    dry_run: bool,
+) -> None:
+    """Re-segment a song so Riff Repeater gives smaller bites where notes are dense."""
+    from .reslice import reslice_psarc
+
+    # Resolve PSARC path
+    if file_path is None and song_name is None:
+        console.print("[red]Provide a song name or --file path.[/]")
+        return
+
+    psarc_path: Path | None = file_path
+    if psarc_path is None:
+        # Fuzzy match against catalog
+        cat = Catalog.load()
+        if not cat.songs:
+            console.print("[yellow]No catalog found. Run 'rocksmith-tutor scan' first.[/]")
+            return
+
+        needle = song_name.lower()  # type: ignore[union-attr]
+        matches = [
+            s for s in cat.songs.values()
+            if needle in s.song_name.lower() or needle in s.artist.lower()
+        ]
+        if not matches:
+            console.print(f"[red]No song matching '{song_name}' in catalog.[/]")
+            return
+        if len(matches) > 1:
+            console.print(f"[yellow]Multiple matches for '{song_name}':[/]")
+            for m in matches:
+                console.print(f"  {m.artist} — {m.song_name}  ({m.psarc_path})")
+            console.print("[dim]Use --file to specify directly.[/]")
+            return
+
+        psarc_path = Path(matches[0].psarc_path)
+        console.print(f"[dim]Matched: {matches[0].artist} — {matches[0].song_name}[/]")
+
+    if not psarc_path.exists():
+        console.print(f"[red]File not found:[/] {psarc_path}")
+        return
+
+    # Default output path
+    if output_path is None:
+        output_path = psarc_path.with_name(
+            psarc_path.stem + "_resliced" + psarc_path.suffix
+        )
+
+    console.print(f"[dim]Input:  {psarc_path}[/]")
+    if not dry_run:
+        console.print(f"[dim]Output: {output_path}[/]")
+    console.print(
+        f"[dim]Params: min={min_segment}s  max={max_segment}s  window={window}s[/]"
+    )
+
+    try:
+        # First pass: get original sections for comparison
+        from rocksmith.psarc import PSARC as _PSARC
+        from rocksmith.sng import Song as _Song
+        from .reslice import _find_bass_sng_key
+
+        with open(psarc_path, "rb") as f:
+            content = _PSARC(crypto=True).parse_stream(f)
+        sng_key = _find_bass_sng_key(content)
+        if sng_key:
+            sng = _Song.parse(content[sng_key])
+            orig_sections = list(sng.sections)
+        else:
+            orig_sections = []
+
+        boundaries = reslice_psarc(
+            psarc_path=psarc_path,
+            output_path=output_path,
+            min_segment=min_segment,
+            max_segment=max_segment,
+            window=window,
+            dry_run=dry_run,
+        )
+    except Exception as e:
+        console.print(f"[red]Reslice failed:[/] {e}")
+        raise
+
+    # Display comparison
+    console.print()
+
+    # Before table
+    if orig_sections:
+        table_before = Table(title="Original Sections")
+        table_before.add_column("#", justify="right", style="dim")
+        table_before.add_column("Name", style="cyan")
+        table_before.add_column("Start", justify="right")
+        table_before.add_column("End", justify="right")
+        table_before.add_column("Duration", justify="right")
+        for i, s in enumerate(orig_sections, 1):
+            dur = s.endTime - s.startTime
+            table_before.add_row(
+                str(i), s.name,
+                f"{s.startTime:.1f}s", f"{s.endTime:.1f}s", f"{dur:.1f}s",
+            )
+        console.print(table_before)
+        console.print()
+
+    # After table
+    table_after = Table(
+        title=f"{'Proposed' if dry_run else 'New'} Segments ({len(boundaries)} boundaries)"
+    )
+    table_after.add_column("#", justify="right", style="dim")
+    table_after.add_column("Name", style="cyan")
+    table_after.add_column("Start", justify="right")
+    table_after.add_column("End", justify="right")
+    table_after.add_column("Duration", justify="right")
+
+    for i in range(len(boundaries) - 1):
+        b = boundaries[i]
+        end = boundaries[i + 1].time
+        dur = end - b.time
+        table_after.add_row(
+            str(i + 1), b.name,
+            f"{b.time:.1f}s", f"{end:.1f}s", f"{dur:.1f}s",
+        )
+    console.print(table_after)
+
+    if dry_run:
+        console.print("\n[dim]Dry run — no file written.[/]")
+    else:
+        console.print(f"\n[green]Written:[/] {output_path}")
