@@ -44,10 +44,14 @@ class SegmentBoundary:
 # ---------------------------------------------------------------------------
 
 def _find_bass_sng_key(content: dict[str, bytes]) -> str | None:
-    """Find the bass SNG key, checking both Mac and PC paths."""
+    """Find the bass SNG key, checking both Mac and PC paths.
+
+    Matches on '_bass.sng' suffix to avoid false positives when 'bass'
+    appears in the song name (e.g. 'allaboutthatbass_vocals.sng').
+    """
     for k in content:
         if ("songs/bin/generic/" in k or "songs/bin/macos/" in k) \
-                and k.endswith(".sng") and "bass" in k.lower():
+                and k.lower().endswith("_bass.sng"):
             return k
     return None
 
