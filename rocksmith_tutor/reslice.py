@@ -411,101 +411,167 @@ def rebuild_sng(sng: Container, boundaries: list[SegmentBoundary]) -> bytes:
 # ---------------------------------------------------------------------------
 
 def rebuild_xml(xml_bytes: bytes, boundaries: list[SegmentBoundary]) -> bytes:
-    """Rebuild arrangement XML with new phrases, phraseIterations, sections."""
-    root = ET.fromstring(xml_bytes)
+    """Rebuild arrangement XML with new phrases, phraseIterations, sections.
 
-    # --- Phrases ---
+    Uses regex substitution to preserve original XML formatting — ElementTree
+    mangles attribute order and encoding declarations, which Rocksmith rejects.
+    """
+    import re
+    text = xml_bytes.decode("utf-8")
+
+    # --- Build unique phrases ---
     unique_phrases: dict[str, int] = {}
-    phrase_list: list[tuple[str, int]] = []  # (name, maxDifficulty)
+    phrase_names_in_order: list[str] = []
 
-    # Collect original maxDifficulty per name
+    # Extract original maxDifficulty per phrase name
     orig_max_diff: dict[str, int] = {}
-    phrases_el = root.find("phrases")
-    if phrases_el is not None:
-        for p in phrases_el.findall("phrase"):
-            name = p.get("name", "")
-            md = int(p.get("maxDifficulty", "0"))
-            orig_max_diff[name] = max(orig_max_diff.get(name, 0), md)
+    for m in re.finditer(r'<phrase\s[^>]*name="([^"]*)"[^>]*maxDifficulty="(\d+)"', text):
+        name, md = m.group(1), int(m.group(2))
+        orig_max_diff[name] = max(orig_max_diff.get(name, 0), md)
+    # Also try reversed attribute order
+    for m in re.finditer(r'<phrase\s[^>]*maxDifficulty="(\d+)"[^>]*name="([^"]*)"', text):
+        md, name = int(m.group(1)), m.group(2)
+        orig_max_diff[name] = max(orig_max_diff.get(name, 0), md)
 
-    global_max = max(orig_max_diff.values()) if orig_max_diff else 0
-
-    names_in_order = ["COUNT"]
+    all_names = ["COUNT"]
     for b in boundaries:
         if b.name not in ("COUNT", "END"):
-            names_in_order.append(b.name)
-    names_in_order.append("END")
+            all_names.append(b.name)
+    all_names.append("END")
 
-    for name in names_in_order:
+    for name in all_names:
         if name not in unique_phrases:
-            unique_phrases[name] = len(phrase_list)
-            md = orig_max_diff.get(name, global_max if name not in ("COUNT", "END") else 0)
-            phrase_list.append((name, md))
+            unique_phrases[name] = len(phrase_names_in_order)
+            phrase_names_in_order.append(name)
 
-    # Replace <phrases>
-    if phrases_el is not None:
-        root.remove(phrases_el)
-    new_phrases_el = ET.SubElement(root, "phrases")
-    new_phrases_el.set("count", str(len(phrase_list)))
-    for name, md in phrase_list:
-        p = ET.SubElement(new_phrases_el, "phrase")
-        p.set("name", name)
-        p.set("maxDifficulty", str(md))
-        p.set("disparity", "0")
-        p.set("ignore", "1" if name in ("COUNT", "END") else "0")
-        p.set("solo", "0")
+    # --- Generate <phrases> block ---
+    phrase_lines = [f'  <phrases count="{len(phrase_names_in_order)}">']
+    for name in phrase_names_in_order:
+        md = orig_max_diff.get(name, 0)
+        phrase_lines.append(
+            f'    <phrase disparity="0" ignore="0" maxDifficulty="{md}" '
+            f'name="{name}" solo="0"/>'
+        )
+    phrase_lines.append("  </phrases>")
+    new_phrases_block = "\n".join(phrase_lines)
 
-    # --- PhraseIterations ---
-    pi_el = root.find("phraseIterations")
-    if pi_el is not None:
-        root.remove(pi_el)
-    new_pi_el = ET.SubElement(root, "phraseIterations")
-    new_pi_el.set("count", str(len(boundaries)))
-    for i, b in enumerate(boundaries):
-        phrase_id = unique_phrases.get(b.name, 0)
-        pi = ET.SubElement(new_pi_el, "phraseIteration")
-        pi.set("time", f"{b.time:.3f}")
-        pi.set("phraseId", str(phrase_id))
+    # --- Generate <phraseIterations> block ---
+    pi_lines = [f'  <phraseIterations count="{len(boundaries)}">']
+    for b in boundaries:
+        pid = unique_phrases[b.name]
+        pi_lines.append(f'    <phraseIteration time="{b.time:.3f}" phraseId="{pid}"/>')
+    pi_lines.append("  </phraseIterations>")
+    new_pi_block = "\n".join(pi_lines)
 
-    # --- Sections ---
-    sec_el = root.find("sections")
-    if sec_el is not None:
-        root.remove(sec_el)
-    new_sec_el = ET.SubElement(root, "sections")
+    # --- Generate <sections> block ---
     section_entries = []
     for i, b in enumerate(boundaries):
         if b.name in ("COUNT", "END"):
             continue
-        end_time = boundaries[i + 1].time if i + 1 < len(boundaries) else b.time
-        section_entries.append((b.name, b.number, b.time, end_time))
+        section_entries.append((b.name, b.number, b.time))
+    sec_lines = [f'  <sections count="{len(section_entries)}">']
+    for name, number, start in section_entries:
+        sec_lines.append(f'    <section name="{name}" number="{number}" startTime="{start:.3f}"/>')
+    sec_lines.append("  </sections>")
+    new_sec_block = "\n".join(sec_lines)
 
-    new_sec_el.set("count", str(len(section_entries)))
-    for name, number, start, end in section_entries:
-        s = ET.SubElement(new_sec_el, "section")
-        s.set("name", name)
-        s.set("number", str(number))
-        s.set("startTime", f"{start:.3f}")
+    # --- Detect line ending style ---
+    newline = "\r\n" if "\r\n" in text else "\n"
+    new_phrases_block = new_phrases_block.replace("\n", newline)
+    new_pi_block = new_pi_block.replace("\n", newline)
+    new_sec_block = new_sec_block.replace("\n", newline)
 
-    return ET.tostring(root, encoding="unicode").encode("utf-8")
+    # --- Substitute blocks via regex ---
+    text = re.sub(
+        r'  <phrases count="\d+">[\r\n].*?  </phrases>',
+        new_phrases_block, text, flags=re.DOTALL,
+    )
+    text = re.sub(
+        r'  <phraseIterations count="\d+">[\r\n].*?  </phraseIterations>',
+        new_pi_block, text, flags=re.DOTALL,
+    )
+    text = re.sub(
+        r'  <sections count="\d+">[\r\n].*?  </sections>',
+        new_sec_block, text, flags=re.DOTALL,
+    )
+
+    return text.encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
 # Manifest rebuild
 # ---------------------------------------------------------------------------
 
+def _ui_name(section_name: str, number: int) -> str:
+    """Generate Rocksmith UIName string for a section."""
+    # Rocksmith uses localization tokens like "$[34286] Intro [1]"
+    # but CDLC typically just uses the display name directly
+    return f"$[0] {section_name.capitalize()} [{number}]"
+
+
 def rebuild_manifest(
     manifest_bytes: bytes,
     boundaries: list[SegmentBoundary],
-    new_phrases: list[dict],
 ) -> bytes:
-    """Update manifest JSON with new Sections, Phrases, PhraseIterations."""
+    """Update manifest JSON with new Sections, Phrases, PhraseIterations.
+
+    Matches exact field structure Rocksmith expects.
+    """
     manifest = json.loads(manifest_bytes)
+
+    # Build unique phrase list with iteration counts
+    unique_phrases: dict[str, int] = {}  # name -> index
+    phrase_list: list[dict] = []
+    phrase_iter_counts: dict[str, int] = {}
+
+    for b in boundaries:
+        phrase_iter_counts[b.name] = phrase_iter_counts.get(b.name, 0) + 1
+        if b.name not in unique_phrases:
+            unique_phrases[b.name] = len(phrase_list)
+            phrase_list.append({"name": b.name, "index": len(phrase_list)})
 
     for entry_val in manifest.get("Entries", {}).values():
         attrs = entry_val.get("Attributes", {})
         if not attrs:
             continue
 
-        # Sections
+        # Get original max difficulties per phrase name
+        orig_max_diff: dict[str, int] = {}
+        for p in attrs.get("Phrases", []):
+            name = p.get("Name", "")
+            md = p.get("MaxDifficulty", 0)
+            orig_max_diff[name] = max(orig_max_diff.get(name, 0), md)
+        global_max = max(orig_max_diff.values()) if orig_max_diff else 0
+
+        # Phrases: {MaxDifficulty, Name, IterationCount}
+        new_phrases = []
+        for pl in phrase_list:
+            name = pl["name"]
+            md = orig_max_diff.get(name, global_max if name not in ("COUNT", "END") else 0)
+            new_phrases.append({
+                "MaxDifficulty": md,
+                "Name": name,
+                "IterationCount": phrase_iter_counts[name],
+            })
+        attrs["Phrases"] = new_phrases
+
+        # PhraseIterations: {PhraseIndex, MaxDifficulty, Name, StartTime, EndTime}
+        pi_list = []
+        for i, b in enumerate(boundaries):
+            end_time = boundaries[i + 1].time if i + 1 < len(boundaries) else b.time
+            pidx = unique_phrases[b.name]
+            md = new_phrases[pidx]["MaxDifficulty"]
+            pi_list.append({
+                "PhraseIndex": pidx,
+                "MaxDifficulty": md,
+                "Name": b.name,
+                "StartTime": round(b.time, 3),
+                "EndTime": round(end_time, 3),
+            })
+        attrs["PhraseIterations"] = pi_list
+
+        # Sections: {Name, UIName, Number, StartTime, EndTime,
+        #            StartPhraseIterationIndex, EndPhraseIterationIndex, IsSolo}
         new_sections = []
         section_name_counts: dict[str, int] = {}
         for i, b in enumerate(boundaries):
@@ -513,35 +579,18 @@ def rebuild_manifest(
                 continue
             end_time = boundaries[i + 1].time if i + 1 < len(boundaries) else b.time
             section_name_counts[b.name] = section_name_counts.get(b.name, 0) + 1
+            num = section_name_counts[b.name]
             new_sections.append({
                 "Name": b.name,
-                "Number": section_name_counts[b.name],
+                "UIName": _ui_name(b.name, num),
+                "Number": num,
                 "StartTime": round(b.time, 3),
                 "EndTime": round(end_time, 3),
+                "StartPhraseIterationIndex": i,
+                "EndPhraseIterationIndex": i,
                 "IsSolo": False,
             })
         attrs["Sections"] = new_sections
-
-        # Phrases
-        attrs["Phrases"] = new_phrases
-
-        # PhraseIterations
-        unique_names: dict[str, int] = {}
-        phrase_id_map: dict[str, int] = {}
-        for p in new_phrases:
-            if p["Name"] not in phrase_id_map:
-                phrase_id_map[p["Name"]] = len(phrase_id_map)
-
-        pi_list = []
-        for i, b in enumerate(boundaries):
-            end_time = boundaries[i + 1].time if i + 1 < len(boundaries) else b.time
-            pid = phrase_id_map.get(b.name, 0)
-            pi_list.append({
-                "PhraseId": pid,
-                "StartTime": round(b.time, 3),
-                "EndTime": round(end_time, 3),
-            })
-        attrs["PhraseIterations"] = pi_list
 
     return json.dumps(manifest, indent=2).encode("utf-8")
 
@@ -605,13 +654,43 @@ def reslice_psarc(
     if dry_run:
         return boundaries
 
-    # Rebuild SNG — this is what Rocksmith uses for gameplay
-    new_sng_bytes = rebuild_sng(sng, boundaries)
-    content[sng_key] = new_sng_bytes
+    # Rebuild ALL arrangement SNGs (sections are song-level in Rocksmith)
+    for key in list(content.keys()):
+        if ("songs/bin/generic/" in key or "songs/bin/macos/" in key) \
+                and key.endswith(".sng"):
+            try:
+                arr_sng = Song.parse(content[key])
+                if arr_sng.sections:  # skip vocals (no sections)
+                    content[key] = rebuild_sng(arr_sng, boundaries)
+                    log.info("Rebuilt SNG: %s", key)
+            except Exception as e:
+                log.warning("Failed to rebuild SNG %s: %s", key, e)
 
-    # NOTE: XML and manifest are left untouched. Rocksmith reads the SNG
-    # for gameplay; the XML/manifest are only used by toolkit editors.
-    # Modifying the XML causes Rocksmith to reject the PSARC.
+    # Rebuild ALL manifests (sections are song-level in Rocksmith)
+    for key in list(content.keys()):
+        if key.startswith("manifests/") and key.endswith(".json"):
+            try:
+                manifest = json.loads(content[key])
+                has_sections = any(
+                    entry.get("Attributes", {}).get("Sections")
+                    for entry in manifest.get("Entries", {}).values()
+                )
+                if has_sections:
+                    content[key] = rebuild_manifest(content[key], boundaries)
+                    log.info("Rebuilt manifest: %s", key)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+
+    # Rebuild ALL arrangement XMLs (sections are song-level in Rocksmith)
+    for key in list(content.keys()):
+        if key.startswith("songs/arr/") and key.endswith(".xml"):
+            try:
+                xml_text = content[key].decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            if "<sections" in xml_text:
+                content[key] = rebuild_xml(content[key], boundaries)
+                log.info("Rebuilt XML: %s", key)
 
     # Write output PSARC
     with open(output_path, "wb") as f:
