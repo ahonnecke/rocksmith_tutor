@@ -541,6 +541,29 @@ def enrich(force: bool, model: str | None, batch_size: int, skip_llm: bool) -> N
 
 
 @cli.command()
+@click.argument("psarc_file", type=click.Path(exists=True, path_type=Path))
+def validate(psarc_file: Path) -> None:
+    """Validate a PSARC for known Rocksmith failure modes."""
+    from .validate import validate_psarc
+
+    console.print(f"[dim]Validating: {psarc_file}[/]\n")
+    report = validate_psarc(psarc_file)
+
+    for check in report.checks:
+        icon = "[green]\u2713[/]" if check.passed else "[red]\u2717[/]"
+        detail = f"  [dim]{check.detail}[/]" if check.detail else ""
+        console.print(f"  {icon} {check.name}{detail}")
+
+    console.print()
+    if report.passed:
+        console.print(f"[green]All {len(report.checks)} checks passed.[/]")
+    else:
+        console.print(
+            f"[red]{report.failed_count} of {len(report.checks)} checks failed.[/]"
+        )
+
+
+@cli.command()
 @click.argument("song_name", required=False)
 @click.option("--file", "file_path", type=click.Path(exists=True, path_type=Path),
               help="Direct path to a .psarc file")

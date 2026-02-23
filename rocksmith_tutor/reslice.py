@@ -8,15 +8,12 @@ from __future__ import annotations
 import bisect
 import json
 import logging
-import xml.etree.ElementTree as ET
 from copy import deepcopy
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 
 from construct import Container, ListContainer
 
-from rocksmith.crypto import WIN_KEY, decrypt_sng, encrypt_sng
 from rocksmith.psarc import PSARC
 from rocksmith.sng import Song
 
@@ -46,29 +43,11 @@ class SegmentBoundary:
 # PSARC key helpers
 # ---------------------------------------------------------------------------
 
-def _find_keys(content: dict[str, bytes], suffix: str) -> list[str]:
-    """Find content keys ending with a suffix (case-insensitive on the key)."""
-    return [k for k in content if k.lower().endswith(suffix.lower())]
-
-
 def _find_bass_sng_key(content: dict[str, bytes]) -> str | None:
+    """Find the bass SNG key, checking both Mac and PC paths."""
     for k in content:
         if ("songs/bin/generic/" in k or "songs/bin/macos/" in k) \
                 and k.endswith(".sng") and "bass" in k.lower():
-            return k
-    return None
-
-
-def _find_bass_xml_key(content: dict[str, bytes]) -> str | None:
-    for k in content:
-        if "songs/arr/" in k and k.endswith(".xml") and "bass" in k.lower():
-            return k
-    return None
-
-
-def _find_bass_manifest_key(content: dict[str, bytes]) -> str | None:
-    for k in content:
-        if k.startswith("manifests/") and k.endswith("_bass.json"):
             return k
     return None
 
