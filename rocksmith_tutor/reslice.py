@@ -299,16 +299,13 @@ def rebuild_sng(sng: Container, boundaries: list[SegmentBoundary]) -> bytes:
             continue
         section_name_counts[name] = section_name_counts.get(name, 0) + 1
 
-        # Find the end PI for this section (next section start, or last PI)
-        end_pi_idx = pi_idx + 1 if pi_idx + 1 < len(new_pi) else pi_idx
-
         new_sections.append(Container(
             name=name,
             number=section_name_counts[name],
             startTime=pi.time,
             endTime=pi.endTime,
             startPhraseIterationId=pi_idx,
-            endPhraseIterationId=end_pi_idx,
+            endPhraseIterationId=pi_idx,  # inclusive, same as original format
             stringMask=ListContainer([0] * 36),
         ))
 
