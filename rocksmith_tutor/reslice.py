@@ -236,13 +236,14 @@ def rebuild_sng(sng: Container, boundaries: list[SegmentBoundary]) -> bytes:
     sng = deepcopy(sng)
 
     # --- 1. Build new phrases ---
-    # COUNT at index 0, named interior phrases, END at last index
+    # COUNT at index 0, named interior phrases.  No separate END phrase —
+    # the original Rocksmith format uses the last section's PI as the song
+    # end marker, not a dedicated END PI.
     phrase_names: list[str] = []
     phrase_names.append("COUNT")
     for b in boundaries:
         if b.name not in ("COUNT", "END"):
             phrase_names.append(b.name)
-    phrase_names.append("END")
 
     # Deduplicate phrase definitions — map name -> phraseId
     unique_phrases: dict[str, int] = {}
@@ -269,12 +270,13 @@ def rebuild_sng(sng: Container, boundaries: list[SegmentBoundary]) -> bytes:
                 name=name,
             ))
 
-    # --- 2. Build new phraseIterations ---
+    # --- 2. Build new phraseIterations (skip END boundary) ---
+    non_end = [b for b in boundaries if b.name != "END"]
+    sl = sng.metadata.songLength
     new_pi = ListContainer()
-    for i, b in enumerate(boundaries):
-        phrase_id = unique_phrases[b.name if b.name in unique_phrases else
-                                   ("COUNT" if i == 0 else "END")]
-        end_time = boundaries[i + 1].time if i + 1 < len(boundaries) else b.time
+    for i, b in enumerate(non_end):
+        phrase_id = unique_phrases.get(b.name, 0)
+        end_time = non_end[i + 1].time if i + 1 < len(non_end) else sl
         max_diff = new_phrases[phrase_id].maxDifficulty
         new_pi.append(Container(
             phraseId=phrase_id,
@@ -417,7 +419,6 @@ def rebuild_xml(xml_bytes: bytes, boundaries: list[SegmentBoundary]) -> bytes:
     for b in boundaries:
         if b.name not in ("COUNT", "END"):
             all_names.append(b.name)
-    all_names.append("END")
 
     for name in all_names:
         if name not in unique_phrases:
@@ -435,9 +436,10 @@ def rebuild_xml(xml_bytes: bytes, boundaries: list[SegmentBoundary]) -> bytes:
     phrase_lines.append("  </phrases>")
     new_phrases_block = "\n".join(phrase_lines)
 
-    # --- Generate <phraseIterations> block ---
-    pi_lines = [f'  <phraseIterations count="{len(boundaries)}">']
-    for b in boundaries:
+    # --- Generate <phraseIterations> block (skip END) ---
+    non_end = [b for b in boundaries if b.name != "END"]
+    pi_lines = [f'  <phraseIterations count="{len(non_end)}">']
+    for b in non_end:
         pid = unique_phrases[b.name]
         pi_lines.append(f'    <phraseIteration time="{b.time:.3f}" phraseId="{pid}"/>')
     pi_lines.append("  </phraseIterations>")
@@ -499,12 +501,13 @@ def rebuild_manifest(
     """
     manifest = json.loads(manifest_bytes)
 
-    # Build unique phrase list with iteration counts
+    # Build unique phrase list with iteration counts (skip END)
+    non_end = [b for b in boundaries if b.name != "END"]
     unique_phrases: dict[str, int] = {}  # name -> index
     phrase_list: list[dict] = []
     phrase_iter_counts: dict[str, int] = {}
 
-    for b in boundaries:
+    for b in non_end:
         phrase_iter_counts[b.name] = phrase_iter_counts.get(b.name, 0) + 1
         if b.name not in unique_phrases:
             unique_phrases[b.name] = len(phrase_list)
@@ -537,8 +540,8 @@ def rebuild_manifest(
 
         # PhraseIterations: {PhraseIndex, MaxDifficulty, Name, StartTime, EndTime}
         pi_list = []
-        for i, b in enumerate(boundaries):
-            end_time = boundaries[i + 1].time if i + 1 < len(boundaries) else b.time
+        for i, b in enumerate(non_end):
+            end_time = non_end[i + 1].time if i + 1 < len(non_end) else b.time
             pidx = unique_phrases[b.name]
             md = new_phrases[pidx]["MaxDifficulty"]
             pi_list.append({
@@ -554,10 +557,10 @@ def rebuild_manifest(
         #            StartPhraseIterationIndex, EndPhraseIterationIndex, IsSolo}
         new_sections = []
         section_name_counts: dict[str, int] = {}
-        for i, b in enumerate(boundaries):
-            if b.name in ("COUNT", "END"):
+        for i, b in enumerate(non_end):
+            if b.name == "COUNT":
                 continue
-            end_time = boundaries[i + 1].time if i + 1 < len(boundaries) else b.time
+            end_time = non_end[i + 1].time if i + 1 < len(non_end) else b.time
             section_name_counts[b.name] = section_name_counts.get(b.name, 0) + 1
             num = section_name_counts[b.name]
             new_sections.append({
