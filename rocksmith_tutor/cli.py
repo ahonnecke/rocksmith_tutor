@@ -577,6 +577,8 @@ def validate(psarc_file: Path) -> None:
               help="Output path (default: {stem}_resliced{suffix})")
 @click.option("--dry-run", is_flag=True,
               help="Print before/after comparison, don't write")
+@click.option("--split-at", multiple=True, type=float,
+              help="Force a boundary at this timestamp (seconds). Repeatable.")
 def reslice(
     song_name: str | None,
     file_path: Path | None,
@@ -585,6 +587,7 @@ def reslice(
     window: float,
     output_path: Path | None,
     dry_run: bool,
+    split_at: tuple[float, ...],
 ) -> None:
     """Re-segment a song so Riff Repeater gives smaller bites where notes are dense."""
     from .reslice import reslice_psarc
@@ -633,9 +636,12 @@ def reslice(
     console.print(f"[dim]Input:  {psarc_path}[/]")
     if not dry_run:
         console.print(f"[dim]Output: {output_path}[/]")
-    console.print(
-        f"[dim]Params: min={min_segment}s  max={max_segment}s  window={window}s[/]"
-    )
+    manual_splits = list(split_at) if split_at else None
+    params_str = f"[dim]Params: min={min_segment}s  max={max_segment}s  window={window}s"
+    if manual_splits:
+        params_str += f"  splits={','.join(f'{t:.1f}' for t in manual_splits)}"
+    params_str += "[/]"
+    console.print(params_str)
 
     try:
         # First pass: get original sections for comparison
@@ -659,6 +665,7 @@ def reslice(
             max_segment=max_segment,
             window=window,
             dry_run=dry_run,
+            manual_splits=manual_splits,
         )
     except Exception as e:
         console.print(f"[red]Reslice failed:[/] {e}")

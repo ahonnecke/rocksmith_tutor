@@ -131,11 +131,16 @@ def determine_boundaries(
     song_length: float,
     min_segment: float = 3.0,
     max_segment: float = 15.0,
+    manual_splits: list[float] | None = None,
 ) -> list[SegmentBoundary]:
     """Compute segment boundaries based on density curve.
 
     Target duration = max_segment - (max_segment - min_segment) * (local_density / max_density)
     Dense regions get shorter segments, sparse get longer.
+
+    manual_splits: additional timestamps to force as boundaries, merged
+    with density-computed boundaries (duplicates within min_segment are
+    deduplicated).
     """
     if not density_curve:
         return [
@@ -179,6 +184,20 @@ def determine_boundaries(
 
         boundaries.append(SegmentBoundary(time=snapped, name="", number=0))
         cursor = snapped
+
+    # Merge manual splits
+    if manual_splits:
+        existing_times = {b.time for b in boundaries}
+        for t in manual_splits:
+            if t <= 0 or t >= song_length:
+                continue
+            # Skip if too close to an existing boundary
+            too_close = any(abs(t - et) < 1.0 for et in existing_times)
+            if not too_close:
+                boundaries.append(SegmentBoundary(time=t, name="", number=0))
+                existing_times.add(t)
+        # Re-sort by time (COUNT stays first since time=0)
+        boundaries.sort(key=lambda b: b.time)
 
     boundaries.append(SegmentBoundary(time=song_length, name="END", number=1))
     return boundaries
@@ -447,7 +466,7 @@ def rebuild_xml(xml_bytes: bytes, boundaries: list[SegmentBoundary]) -> bytes:
 
     # --- Generate <sections> block ---
     section_entries = []
-    for i, b in enumerate(boundaries):
+    for b in boundaries:
         if b.name in ("COUNT", "END"):
             continue
         section_entries.append((b.name, b.number, b.time))
@@ -589,6 +608,7 @@ def reslice_psarc(
     max_segment: float = 15.0,
     window: float = 2.0,
     dry_run: bool = False,
+    manual_splits: list[float] | None = None,
 ) -> list[SegmentBoundary]:
     """Re-segment a PSARC file based on note density.
 
@@ -627,6 +647,7 @@ def reslice_psarc(
     boundaries = determine_boundaries(
         curve, list(sng.beats), song_length,
         min_segment=min_segment, max_segment=max_segment,
+        manual_splits=manual_splits,
     )
 
     # Assign section names from original sections
