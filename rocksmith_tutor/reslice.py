@@ -1,6 +1,7 @@
-"""Re-segment Rocksmith PSARC files based on note density.
+"""Re-segment Rocksmith PSARC files based on note-gap analysis.
 
-Dense sections get shorter Riff Repeater segments, sparse sections get longer ones.
+Boundaries land in the largest gaps between notes — musically natural break
+points rather than arbitrary density-window positions.
 """
 
 from __future__ import annotations
@@ -8,6 +9,7 @@ from __future__ import annotations
 import bisect
 import json
 import logging
+import statistics
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +39,96 @@ class SegmentBoundary:
     time: float
     name: str
     number: int
+
+
+@dataclass
+class NoteGap:
+    """A gap between two consecutive notes, scored as a boundary candidate."""
+    index: int          # index of note *before* the gap
+    start: float        # gap_start = notes[i].time + notes[i].sustain
+    end: float          # gap_end   = notes[i+1].time
+    duration: float     # end - start (negative when sustain bleeds over)
+    midpoint: float     # (start + end) / 2
+    score: float = 0.0
+    snap_target: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Note-gap analysis
+# ---------------------------------------------------------------------------
+
+def _compute_note_gaps(notes: list) -> list[NoteGap]:
+    """Extract sustain-aware gaps between consecutive notes."""
+    gaps: list[NoteGap] = []
+    for i in range(len(notes) - 1):
+        sustain = getattr(notes[i], "sustain", 0.0) or 0.0
+        gap_start = notes[i].time + sustain
+        gap_end = notes[i + 1].time
+        duration = gap_end - gap_start
+        gaps.append(NoteGap(
+            index=i,
+            start=gap_start,
+            end=gap_end,
+            duration=duration,
+            midpoint=(gap_start + gap_end) / 2,
+        ))
+    return gaps
+
+
+def _score_gaps(gaps: list[NoteGap], beats: list) -> None:
+    """Score each gap using local-median ratio + beat-alignment bonus.
+
+    Mutates gaps in place, setting .score and .snap_target.
+    """
+    if not gaps:
+        return
+
+    # Pre-compute measure-start times for beat bonus
+    measure_times = sorted(b.time for b in beats if b.beat == 0)
+
+    half_window = 10  # ~20 surrounding gaps
+
+    for i, gap in enumerate(gaps):
+        if gap.duration <= 0:
+            gap.score = 0.0
+            continue
+
+        # Local median of surrounding gap durations (only positive ones)
+        lo = max(0, i - half_window)
+        hi = min(len(gaps), i + half_window + 1)
+        neighbors = [g.duration for g in gaps[lo:hi] if g.duration > 0]
+        local_med = statistics.median(neighbors) if neighbors else gap.duration
+
+        # Avoid division by zero
+        if local_med <= 0:
+            local_med = gap.duration
+
+        gap.score = gap.duration * (gap.duration / local_med)
+
+        # Beat alignment bonus: measure start within the gap → 1.5x
+        idx = bisect.bisect_left(measure_times, gap.start)
+        for j in range(max(0, idx - 1), min(len(measure_times), idx + 2)):
+            if gap.start <= measure_times[j] <= gap.end:
+                gap.score *= 1.5
+                break
+
+        # Snap midpoint to nearest beat
+        gap.snap_target = _snap_to_beat(gap.midpoint, beats)
+
+
+def _best_gap_in_range(
+    gaps: list[NoteGap],
+    lo: float,
+    hi: float,
+) -> NoteGap | None:
+    """Return the highest-scored gap whose midpoint falls in [lo, hi]."""
+    best: NoteGap | None = None
+    for g in gaps:
+        if g.duration <= 0:
+            continue
+        if lo <= g.midpoint <= hi and (best is None or g.score > best.score):
+            best = g
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -126,79 +218,89 @@ def _snap_to_beat(time: float, beats: list, prefer_measure_start: bool = True) -
 
 
 def determine_boundaries(
-    density_curve: list[DensityPoint],
+    notes: list,
     beats: list,
     song_length: float,
     min_segment: float = 3.0,
     max_segment: float = 15.0,
     manual_splits: list[float] | None = None,
 ) -> list[SegmentBoundary]:
-    """Compute segment boundaries based on density curve.
+    """Compute segment boundaries by scoring inter-note gaps.
 
-    Target duration = max_segment - (max_segment - min_segment) * (local_density / max_density)
-    Dense regions get shorter segments, sparse get longer.
+    Boundaries land in the largest gaps between notes — musically natural
+    break points.  A greedy algorithm selects the highest-scored gaps
+    subject to min/max segment duration constraints.
 
-    manual_splits: additional timestamps to force as boundaries, merged
-    with density-computed boundaries (duplicates within min_segment are
-    deduplicated).
+    manual_splits: additional timestamps forced as boundaries, merged
+    with gap-selected boundaries (duplicates within 1s are deduplicated).
     """
-    if not density_curve:
+    if not notes:
         return [
             SegmentBoundary(time=0.0, name="COUNT", number=1),
             SegmentBoundary(time=song_length, name="END", number=1),
         ]
 
-    max_density = max(dp.notes_per_second for dp in density_curve)
-    if max_density == 0:
-        max_density = 1.0  # avoid division by zero
+    # --- Step 1-2: compute and score gaps ---
+    gaps = _compute_note_gaps(notes)
+    _score_gaps(gaps, beats)
 
-    # Build a lookup: time -> density
-    density_at: dict[float, float] = {dp.time: dp.notes_per_second for dp in density_curve}
-    density_times = sorted(density_at.keys())
+    # --- Step 3: iteratively split the longest span using highest-scored gap ---
+    selected_times: list[float] = []
 
-    def local_density(t: float) -> float:
-        idx = bisect.bisect_right(density_times, t) - 1
-        idx = max(0, min(idx, len(density_times) - 1))
-        return density_at[density_times[idx]]
+    def _all_bounds() -> list[float]:
+        return sorted([0.0] + selected_times + [song_length])
 
-    boundaries = [SegmentBoundary(time=0.0, name="COUNT", number=1)]
+    def _respects_min(t: float) -> bool:
+        for et in _all_bounds():
+            if abs(t - et) < min_segment:
+                return False
+        return True
 
-    cursor = 0.0
-    while cursor < song_length:
-        ld = local_density(cursor)
-        ratio = ld / max_density
-        target = max_segment - (max_segment - min_segment) * ratio
-        next_time = cursor + target
+    # Keep splitting while any span exceeds max_segment
+    for _ in range(200):  # safety bound
+        bounds = _all_bounds()
+        # Find the longest span
+        worst_span = 0.0
+        worst_lo = 0.0
+        worst_hi = 0.0
+        for i in range(len(bounds) - 1):
+            span = bounds[i + 1] - bounds[i]
+            if span > worst_span:
+                worst_span = span
+                worst_lo = bounds[i]
+                worst_hi = bounds[i + 1]
 
-        if next_time >= song_length - min_segment:
+        if worst_span <= max_segment:
             break
 
-        snapped = _snap_to_beat(next_time, beats)
+        best = _best_gap_in_range(gaps, worst_lo, worst_hi)
+        if best is not None and _respects_min(best.snap_target):
+            selected_times.append(best.snap_target)
+        else:
+            # No scored gap — insert midpoint snapped to beat
+            mid = (worst_lo + worst_hi) / 2
+            t = _snap_to_beat(mid, beats)
+            if _respects_min(t):
+                selected_times.append(t)
+            else:
+                # Force it in even if min_segment is tight
+                selected_times.append(t)
+                break  # avoid infinite loop
 
-        # Enforce minimum spacing from last boundary
-        if snapped - cursor < min_segment:
-            snapped = cursor + min_segment
-
-        if snapped >= song_length:
-            break
-
-        boundaries.append(SegmentBoundary(time=snapped, name="", number=0))
-        cursor = snapped
-
-    # Merge manual splits
+    # --- Merge manual splits ---
     if manual_splits:
-        existing_times = {b.time for b in boundaries}
         for t in manual_splits:
             if t <= 0 or t >= song_length:
                 continue
-            # Skip if too close to an existing boundary
-            too_close = any(abs(t - et) < 1.0 for et in existing_times)
+            too_close = any(abs(t - et) < 1.0 for et in selected_times)
             if not too_close:
-                boundaries.append(SegmentBoundary(time=t, name="", number=0))
-                existing_times.add(t)
-        # Re-sort by time (COUNT stays first since time=0)
-        boundaries.sort(key=lambda b: b.time)
+                selected_times.append(t)
 
+    # --- Build boundary list ---
+    selected_times = sorted(set(selected_times))
+    boundaries = [SegmentBoundary(time=0.0, name="COUNT", number=1)]
+    for t in selected_times:
+        boundaries.append(SegmentBoundary(time=t, name="", number=0))
     boundaries.append(SegmentBoundary(time=song_length, name="END", number=1))
     return boundaries
 
@@ -264,21 +366,46 @@ def rebuild_sng(sng: Container, boundaries: list[SegmentBoundary]) -> bytes:
         if b.name not in ("COUNT", "END"):
             phrase_names.append(b.name)
 
+    # Build a lookup: for any time range, find the original PI whose time
+    # range overlaps the most, and inherit its phrase's maxDifficulty.
+    # This preserves DD ladders even when original phrase names (p0, p1, ...)
+    # don't match section names (intro, verse, ...).
+    orig_pi_times = [(pi.time, pi.endTime, sng.phrases[pi.phraseId].maxDifficulty)
+                     for pi in sng.phraseIterations]
+
+    def _max_diff_for_range(t_start: float, t_end: float) -> int:
+        """Find max of maxDifficulty across all original PIs that overlap this range.
+
+        Must be the max (not dominant) because notes from a high-maxDiff
+        original PI exist at levels above a low-maxDiff one.  If the new PI
+        straddles both, the phrase ceiling must accommodate the higher.
+        """
+        result = 0
+        for ot_start, ot_end, md in orig_pi_times:
+            overlap = max(0.0, min(t_end, ot_end) - max(t_start, ot_start))
+            if overlap > 0:
+                result = max(result, md)
+        return result
+
     # Deduplicate phrase definitions — map name -> phraseId
     unique_phrases: dict[str, int] = {}
     new_phrases = ListContainer()
 
+    # First pass: collect per-name max difficulty from boundary time ranges
+    non_end = [b for b in boundaries if b.name != "END"]
+    sl = sng.metadata.songLength
+    name_max_diff: dict[str, int] = {}
+    for i, b in enumerate(non_end):
+        if b.name in ("COUNT", "END"):
+            continue
+        end_time = non_end[i + 1].time if i + 1 < len(non_end) else sl
+        md = _max_diff_for_range(b.time, end_time)
+        name_max_diff[b.name] = max(name_max_diff.get(b.name, 0), md)
+
     for name in phrase_names:
         if name not in unique_phrases:
             unique_phrases[name] = len(new_phrases)
-            # Find maxDifficulty from original phrases with same name
-            max_diff = 0
-            for orig_p in sng.phrases:
-                if orig_p.name == name:
-                    max_diff = max(max_diff, orig_p.maxDifficulty)
-            if max_diff == 0 and name not in ("COUNT", "END"):
-                # Use the global max difficulty
-                max_diff = max(p.maxDifficulty for p in sng.phrases) if sng.phrases else 0
+            max_diff = name_max_diff.get(name, 0)
 
             new_phrases.append(Container(
                 solo=0,
@@ -290,18 +417,19 @@ def rebuild_sng(sng: Container, boundaries: list[SegmentBoundary]) -> bytes:
             ))
 
     # --- 2. Build new phraseIterations (skip END boundary) ---
-    non_end = [b for b in boundaries if b.name != "END"]
-    sl = sng.metadata.songLength
     new_pi = ListContainer()
     for i, b in enumerate(non_end):
         phrase_id = unique_phrases.get(b.name, 0)
         end_time = non_end[i + 1].time if i + 1 < len(non_end) else sl
-        max_diff = new_phrases[phrase_id].maxDifficulty
+        # Use per-PI maxDifficulty from the overlapping original PI,
+        # capped at the phrase's maxDifficulty.
+        pi_max_diff = _max_diff_for_range(b.time, end_time)
+        pi_max_diff = min(pi_max_diff, new_phrases[phrase_id].maxDifficulty)
         new_pi.append(Container(
             phraseId=phrase_id,
             time=b.time,
             endTime=end_time,
-            difficulty=ListContainer([max_diff, max_diff, max_diff]),
+            difficulty=ListContainer([pi_max_diff, pi_max_diff, pi_max_diff]),
         ))
 
     # Update phraseIterationLinks on phrases
@@ -401,8 +529,11 @@ def rebuild_sng(sng: Container, boundaries: list[SegmentBoundary]) -> bytes:
     sng.phraseIterations = new_pi
     sng.sections = new_sections
 
-    # Clear phraseExtraInfos (optional metadata, safe to empty)
+    # Clear phraseExtraInfos (optional DD metadata, safe to empty)
     sng.phraseExtraInfos = ListContainer()
+
+    # Clear newLinkedDiffs (phrase indices are remapped, stale refs break DD)
+    sng.newLinkedDiffs = ListContainer()
 
     return Song.build(sng)
 
@@ -606,11 +737,10 @@ def reslice_psarc(
     output_path: Path,
     min_segment: float = 3.0,
     max_segment: float = 15.0,
-    window: float = 2.0,
     dry_run: bool = False,
     manual_splits: list[float] | None = None,
 ) -> list[SegmentBoundary]:
-    """Re-segment a PSARC file based on note density.
+    """Re-segment a PSARC file based on note-gap analysis.
 
     Returns the computed boundaries (useful for dry-run display).
     """
@@ -628,24 +758,37 @@ def reslice_psarc(
     log.info("Parsed SNG: %d phrases, %d phraseIterations, %d sections",
              len(sng.phrases), len(sng.phraseIterations), len(sng.sections))
 
-    # Get notes from highest difficulty level
+    # Get notes from the best level for gap analysis.
+    # For DD songs, the global max level may only contain notes for
+    # the highest-maxDifficulty phrases.  We want the highest level
+    # that still covers ALL non-ignored phrase iterations.
     if not sng.levels:
         raise ValueError("No levels found in SNG")
-    max_diff = max(lv.difficulty for lv in sng.levels)
-    top_level = next(lv for lv in sng.levels if lv.difficulty == max_diff)
-    notes = list(top_level.notes)
-    log.info("Top level (%d): %d notes", max_diff, len(notes))
 
-    # Compute density curve
-    curve = compute_density_curve(notes, window_size=window, step=0.5)
-    log.info("Density curve: %d points, max=%.1f n/s",
-             len(curve),
-             max(dp.notes_per_second for dp in curve) if curve else 0)
+    ignored_pi = {
+        i for i, pi in enumerate(sng.phraseIterations)
+        if sng.phrases[pi.phraseId].ignore
+    }
+    target_pis = set(range(len(sng.phraseIterations))) - ignored_pi
 
-    # Determine boundaries
+    best_level = None
+    for lv in sorted(sng.levels, key=lambda l: l.difficulty, reverse=True):
+        covered = {n.phraseIterationId for n in lv.notes}
+        if target_pis <= covered:
+            best_level = lv
+            break
+
+    if best_level is None:
+        # Fallback: level with the most notes
+        best_level = max(sng.levels, key=lambda l: len(l.notes))
+
+    notes = list(best_level.notes)
+    log.info("Analysis level (%d): %d notes", best_level.difficulty, len(notes))
+
+    # Determine boundaries from note gaps
     song_length = sng.metadata.songLength
     boundaries = determine_boundaries(
-        curve, list(sng.beats), song_length,
+        notes, list(sng.beats), song_length,
         min_segment=min_segment, max_segment=max_segment,
         manual_splits=manual_splits,
     )

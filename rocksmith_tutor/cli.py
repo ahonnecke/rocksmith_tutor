@@ -571,8 +571,6 @@ def validate(psarc_file: Path) -> None:
               help="Minimum segment duration in seconds (default: 3.0)")
 @click.option("--max-segment", default=15.0, type=float,
               help="Maximum segment duration in seconds (default: 15.0)")
-@click.option("--window", default=2.0, type=float,
-              help="Density analysis window size in seconds (default: 2.0)")
 @click.option("--output", "-o", "output_path", type=click.Path(path_type=Path),
               help="Output path (default: {stem}_resliced{suffix})")
 @click.option("--dry-run", is_flag=True,
@@ -584,7 +582,6 @@ def reslice(
     file_path: Path | None,
     min_segment: float,
     max_segment: float,
-    window: float,
     output_path: Path | None,
     dry_run: bool,
     split_at: tuple[float, ...],
@@ -637,7 +634,7 @@ def reslice(
     if not dry_run:
         console.print(f"[dim]Output: {output_path}[/]")
     manual_splits = list(split_at) if split_at else None
-    params_str = f"[dim]Params: min={min_segment}s  max={max_segment}s  window={window}s"
+    params_str = f"[dim]Params: min={min_segment}s  max={max_segment}s"
     if manual_splits:
         params_str += f"  splits={','.join(f'{t:.1f}' for t in manual_splits)}"
     params_str += "[/]"
@@ -663,7 +660,6 @@ def reslice(
             output_path=output_path,
             min_segment=min_segment,
             max_segment=max_segment,
-            window=window,
             dry_run=dry_run,
             manual_splits=manual_splits,
         )
