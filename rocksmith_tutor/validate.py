@@ -256,43 +256,47 @@ def _check_sng_consistency(sng) -> list[str]:
     """Check SNG internal consistency. Returns list of error descriptions."""
     errors = []
     num_pi = len(sng.phraseIterations)
-    num_phrases = len(sng.phrases)
 
-    for level in sng.levels:
+    # --- Global checks (SNG-wide, not per-level) ---
+
+    # Beat PI indices monotonically non-decreasing
+    prev_pi = -1
+    for i, beat in enumerate(sng.beats):
+        if beat.phraseIteration < prev_pi:
+            errors.append(
+                f"beat[{i}].phraseIteration={beat.phraseIteration} < prev={prev_pi} "
+                "(not monotonic)"
+            )
+            break
+        prev_pi = beat.phraseIteration
+
+    # Section PI refs valid
+    for i, sec in enumerate(sng.sections):
+        if sec.startPhraseIterationId >= num_pi:
+            errors.append(f"section[{i}].startPhraseIterationId={sec.startPhraseIterationId} >= {num_pi}")
+        if sec.endPhraseIterationId > num_pi:
+            errors.append(f"section[{i}].endPhraseIterationId={sec.endPhraseIterationId} > {num_pi}")
+
+    # --- Per-level checks ---
+    for lv_idx, level in enumerate(sng.levels):
+        lv_tag = f"lv{lv_idx}"
+
         # Note phraseIterationId / phraseId validity
         for i, note in enumerate(level.notes):
             if note.phraseIterationId >= num_pi:
-                errors.append(f"note[{i}].phraseIterationId={note.phraseIterationId} >= {num_pi} PIs")
-                if len(errors) > 5:
+                errors.append(f"{lv_tag} note[{i}].phraseIterationId={note.phraseIterationId} >= {num_pi} PIs")
+                if len(errors) > 10:
                     errors.append("(truncated)")
                     return errors
             elif note.phraseId != sng.phraseIterations[note.phraseIterationId].phraseId:
                 errors.append(
-                    f"note[{i}].phraseId={note.phraseId} != "
+                    f"{lv_tag} note[{i}].phraseId={note.phraseId} != "
                     f"PI[{note.phraseIterationId}].phraseId="
                     f"{sng.phraseIterations[note.phraseIterationId].phraseId}"
                 )
-                if len(errors) > 5:
+                if len(errors) > 10:
                     errors.append("(truncated)")
                     return errors
-
-        # Beat PI indices monotonically non-decreasing
-        prev_pi = -1
-        for i, beat in enumerate(sng.beats):
-            if beat.phraseIteration < prev_pi:
-                errors.append(
-                    f"beat[{i}].phraseIteration={beat.phraseIteration} < prev={prev_pi} "
-                    "(not monotonic)"
-                )
-                break
-            prev_pi = beat.phraseIteration
-
-        # Section PI refs valid
-        for i, sec in enumerate(sng.sections):
-            if sec.startPhraseIterationId >= num_pi:
-                errors.append(f"section[{i}].startPhraseIterationId={sec.startPhraseIterationId} >= {num_pi}")
-            if sec.endPhraseIterationId > num_pi:
-                errors.append(f"section[{i}].endPhraseIterationId={sec.endPhraseIterationId} > {num_pi}")
 
         # notesInIterCount sums
         if hasattr(level, "notesInIterCount") and level.notesInIterCount:
@@ -300,10 +304,8 @@ def _check_sng_consistency(sng) -> list[str]:
             total_notes = len(level.notes)
             if iter_sum != total_notes:
                 errors.append(
-                    f"notesInIterCount sum={iter_sum} != total notes={total_notes}"
+                    f"{lv_tag} notesInIterCount sum={iter_sum} != total notes={total_notes}"
                 )
-
-        break  # Only check the first level with notes to avoid repetition
 
     return errors
 

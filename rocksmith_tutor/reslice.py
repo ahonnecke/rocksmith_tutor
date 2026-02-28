@@ -896,7 +896,9 @@ def repair_psarc(
         and k.endswith(".sng")
     ]
 
+    # First pass: detect if any arrangement has a section count mismatch
     had_section_mismatch = False
+    arrangement_sngs: list[tuple[str, Container]] = []
     for key in sng_keys:
         short = key.split("/")[-1]
         try:
@@ -906,18 +908,23 @@ def repair_psarc(
             continue
 
         if not arr_sng.sections:
-            # Vocals — no sections, skip
-            continue
+            continue  # Vocals — no sections, skip
 
+        arrangement_sngs.append((key, arr_sng))
         if len(arr_sng.sections) != bass_section_count:
-            # Cross-arrangement mismatch — full rebuild with bass boundaries,
-            # then flatten the result
-            log.info("Rebuilding %s: %d sections -> %d (match bass)",
+            had_section_mismatch = True
+
+    # Second pass: rebuild or flatten each arrangement
+    for key, arr_sng in arrangement_sngs:
+        short = key.split("/")[-1]
+        if had_section_mismatch:
+            # Rebuild ALL arrangements with canonical boundaries so PI counts
+            # are consistent across arrangements and with rebuilt XML/manifest
+            log.info("Rebuilding %s: %d sections -> %d (canonical)",
                      short, len(arr_sng.sections), bass_section_count)
             rebuilt_bytes = rebuild_sng(arr_sng, canonical_boundaries)
-            rebuilt_sng = Song.parse(rebuilt_bytes)
-            content[key] = flatten_sng(rebuilt_sng)
-            had_section_mismatch = True
+            rebuilt_sng_obj = Song.parse(rebuilt_bytes)
+            content[key] = flatten_sng(rebuilt_sng_obj)
         else:
             log.info("Flattening %s: %d levels -> 1", short, len(arr_sng.levels))
             content[key] = flatten_sng(arr_sng)
