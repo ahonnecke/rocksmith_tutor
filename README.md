@@ -58,7 +58,7 @@ See [docs/cdlc-pipeline.md](docs/cdlc-pipeline.md) for the full architecture.
 # Check what's waiting to be promoted
 wayward-promote --list
 
-# Promote to live (immediately visible to Rocksmith)
+# Promote to live on NAS
 wayward-promote --all
 ```
 
