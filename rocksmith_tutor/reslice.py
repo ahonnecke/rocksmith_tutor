@@ -861,13 +861,10 @@ def repair_psarc(
     output_path: Path,
     dry_run: bool = False,
 ) -> "ValidationReport":
-    """Fix broken CDLC by flattening to single max-difficulty level.
+    """Flatten bass arrangement to 100% difficulty.
 
-    Strips DD, keeps only the level with the most notes, sets all
-    maxDifficulty=0, and recomputes derived fields.  For cross-arrangement
-    section mismatches, uses bass SNG sections as canonical.
-
-    XML and manifest are left untouched (no phrase reordering).
+    Only touches the bass SNG — leaves lead, rhythm, vocals, XML, and
+    manifest untouched to minimize risk of breaking anything.
 
     Returns the post-repair ValidationReport.
     """
@@ -876,7 +873,6 @@ def repair_psarc(
     with open(psarc_path, "rb") as f:
         content = PSARC(crypto=True).parse_stream(f)
 
-    # Find bass SNG — canonical source for section structure
     bass_key = _find_bass_sng_key(content)
     if bass_key is None:
         raise ValueError("No bass SNG found in PSARC")
@@ -885,75 +881,9 @@ def repair_psarc(
     if not bass_sng.sections:
         raise ValueError("Bass SNG has no sections")
 
-    canonical_boundaries = _extract_boundaries(bass_sng)
-    bass_section_count = len(bass_sng.sections)
-    log.info("Canonical: %d sections from bass", bass_section_count)
-
-    # Process each arrangement SNG
-    sng_keys = [
-        k for k in content
-        if ("songs/bin/generic/" in k or "songs/bin/macos/" in k)
-        and k.endswith(".sng")
-    ]
-
-    # First pass: detect if any arrangement has a section count mismatch
-    had_section_mismatch = False
-    arrangement_sngs: list[tuple[str, Container]] = []
-    for key in sng_keys:
-        short = key.split("/")[-1]
-        try:
-            arr_sng = Song.parse(content[key])
-        except Exception as e:
-            log.warning("Failed to parse SNG %s: %s", short, e)
-            continue
-
-        if not arr_sng.sections:
-            continue  # Vocals — no sections, skip
-
-        arrangement_sngs.append((key, arr_sng))
-        if len(arr_sng.sections) != bass_section_count:
-            had_section_mismatch = True
-
-    # Second pass: rebuild or flatten each arrangement
-    for key, arr_sng in arrangement_sngs:
-        short = key.split("/")[-1]
-        if had_section_mismatch:
-            # Rebuild ALL arrangements with canonical boundaries so PI counts
-            # are consistent across arrangements and with rebuilt XML/manifest
-            log.info("Rebuilding %s: %d sections -> %d (canonical)",
-                     short, len(arr_sng.sections), bass_section_count)
-            rebuilt_bytes = rebuild_sng(arr_sng, canonical_boundaries)
-            rebuilt_sng_obj = Song.parse(rebuilt_bytes)
-            content[key] = flatten_sng(rebuilt_sng_obj)
-        else:
-            log.info("Flattening %s: %d levels -> 1", short, len(arr_sng.levels))
-            content[key] = flatten_sng(arr_sng)
-
-    # Only rebuild XML/manifest if section structure actually changed
-    if had_section_mismatch:
-        for key in list(content.keys()):
-            if key.startswith("songs/arr/") and key.endswith(".xml"):
-                try:
-                    xml_text = content[key].decode("utf-8")
-                except UnicodeDecodeError:
-                    continue
-                if "<sections" in xml_text:
-                    content[key] = rebuild_xml(content[key], canonical_boundaries)
-                    log.info("Rebuilt XML: %s", key)
-
-        for key in list(content.keys()):
-            if key.startswith("manifests/") and key.endswith(".json"):
-                try:
-                    manifest = json.loads(content[key])
-                    has_sections = any(
-                        entry.get("Attributes", {}).get("Sections")
-                        for entry in manifest.get("Entries", {}).values()
-                    )
-                    if has_sections:
-                        content[key] = rebuild_manifest(content[key], canonical_boundaries)
-                        log.info("Rebuilt manifest: %s", key)
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    continue
+    log.info("Flattening bass: %s (%d levels -> 1)",
+             bass_key.split("/")[-1], len(bass_sng.levels))
+    content[bass_key] = flatten_sng(bass_sng)
 
     if dry_run:
         import tempfile
