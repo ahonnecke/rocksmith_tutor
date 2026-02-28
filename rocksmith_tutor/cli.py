@@ -564,6 +564,83 @@ def validate(psarc_file: Path) -> None:
 
 
 @cli.command()
+@click.argument("psarc_file", type=click.Path(exists=True, path_type=Path))
+@click.option("--output", "-o", "output_path", type=click.Path(path_type=Path),
+              help="Output path (default: {stem}_repaired{suffix})")
+@click.option("--dry-run", is_flag=True,
+              help="Validate before/after without writing")
+def repair(psarc_file: Path, output_path: Path | None, dry_run: bool) -> None:
+    """Flatten CDLC to 100% difficulty and fix structural corruption.
+
+    Strips Dynamic Difficulty (keeps only the max-difficulty level) and
+    recomputes all derived fields (notesInIterCount, phraseId, iter chains,
+    beat/anchor PI assignments). Propagates bass section structure to other
+    arrangements when cross-arrangement counts differ.
+    """
+    from .validate import validate_psarc
+    from .reslice import repair_psarc
+
+    console.print(f"[dim]Input: {psarc_file}[/]")
+
+    # Validate before
+    console.print("\n[bold]Before repair:[/]")
+    before = validate_psarc(psarc_file)
+    for check in before.checks:
+        icon = "[green]\u2713[/]" if check.passed else "[red]\u2717[/]"
+        detail = f"  [dim]{check.detail}[/]" if check.detail else ""
+        console.print(f"  {icon} {check.name}{detail}")
+
+    if before.passed:
+        console.print("\n[green]All checks already pass — nothing to repair.[/]")
+        return
+
+    console.print(
+        f"\n[yellow]{before.failed_count} failure(s) found, repairing...[/]"
+    )
+
+    # Default output path
+    if output_path is None:
+        output_path = psarc_file.with_name(
+            psarc_file.stem + "_repaired" + psarc_file.suffix
+        )
+
+    if not dry_run:
+        console.print(f"[dim]Output: {output_path}[/]")
+
+    try:
+        after = repair_psarc(
+            psarc_path=psarc_file,
+            output_path=output_path,
+            dry_run=dry_run,
+        )
+    except Exception as e:
+        console.print(f"[red]Repair failed:[/] {e}")
+        raise
+
+    # Validate after
+    console.print("\n[bold]After repair:[/]")
+    for check in after.checks:
+        icon = "[green]\u2713[/]" if check.passed else "[red]\u2717[/]"
+        detail = f"  [dim]{check.detail}[/]" if check.detail else ""
+        console.print(f"  {icon} {check.name}{detail}")
+
+    console.print()
+    if after.passed:
+        if dry_run:
+            console.print("[green]All checks would pass after repair.[/]")
+            console.print("[dim]Dry run — no file written.[/]")
+        else:
+            console.print(f"[green]All checks pass. Written:[/] {output_path}")
+    else:
+        remaining = after.failed_count
+        if dry_run:
+            console.print(f"[yellow]{remaining} check(s) would still fail after repair.[/]")
+            console.print("[dim]Dry run — no file written.[/]")
+        else:
+            console.print(f"[yellow]{remaining} check(s) still failing. Written:[/] {output_path}")
+
+
+@cli.command()
 @click.argument("song_name", required=False)
 @click.option("--file", "file_path", type=click.Path(exists=True, path_type=Path),
               help="Direct path to a .psarc file")

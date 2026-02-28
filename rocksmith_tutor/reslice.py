@@ -465,9 +465,10 @@ def rebuild_sng(sng: Container, boundaries: list[SegmentBoundary]) -> bytes:
             s.stringMask = ListContainer(list(default_mask))
 
     # --- 4. Update beats -> phraseIteration index ---
+    # Rocksmith convention: beats on PI boundaries belong to the previous PI
     pi_times = [pi.time for pi in new_pi]
     for beat in sng.beats:
-        idx = bisect.bisect_right(pi_times, beat.time) - 1
+        idx = bisect.bisect_left(pi_times, beat.time) - 1
         beat.phraseIteration = max(0, min(idx, len(new_pi) - 1))
 
     # --- 5-8. Update levels ---
@@ -534,6 +535,108 @@ def rebuild_sng(sng: Container, boundaries: list[SegmentBoundary]) -> bytes:
 
     # Clear newLinkedDiffs (phrase indices are remapped, stale refs break DD)
     sng.newLinkedDiffs = ListContainer()
+
+    return Song.build(sng)
+
+
+# ---------------------------------------------------------------------------
+# SNG flatten (strip DD, single max-difficulty level)
+# ---------------------------------------------------------------------------
+
+def flatten_sng(sng: Container) -> bytes:
+    """Flatten an SNG to a single max-difficulty level.
+
+    Picks the level with the most notes, drops all others, sets every
+    phrase maxDifficulty=0, and recomputes all derived fields.  The result
+    plays at 100% difficulty with no DD ramp-up.
+    """
+    sng = deepcopy(sng)
+
+    if not sng.levels:
+        return Song.build(sng)
+
+    # Pick the level with the most notes (highest difficulty, full note set)
+    best = max(sng.levels, key=lambda l: len(l.notes))
+    best.difficulty = 0
+
+    # Replace levels with just the one
+    sng.levels = ListContainer([best])
+
+    # Set all phrases to maxDifficulty=0
+    for p in sng.phrases:
+        p.maxDifficulty = 0
+
+    # Set all PI difficulty arrays to [0, 0, 0]
+    for pi in sng.phraseIterations:
+        pi.difficulty = ListContainer([0, 0, 0])
+
+    # Clear DD metadata (stale phrase indices after flattening)
+    sng.newLinkedDiffs = ListContainer()
+    sng.phraseExtraInfos = ListContainer()
+
+    # Recompute phrase.phraseIterationLinks
+    for p in sng.phrases:
+        p.phraseIterationLinks = 0
+    for pi in sng.phraseIterations:
+        sng.phrases[pi.phraseId].phraseIterationLinks += 1
+
+    # Recompute beat PI indices.
+    # Rocksmith convention: beats on PI boundaries belong to the previous PI.
+    pi_times = [pi.time for pi in sng.phraseIterations]
+    num_pi = len(sng.phraseIterations)
+    num_phrases = len(sng.phrases)
+
+    for beat in sng.beats:
+        idx = bisect.bisect_left(pi_times, beat.time) - 1
+        beat.phraseIteration = max(0, min(idx, num_pi - 1))
+
+    # Recompute per-level derived fields (single level)
+    level = sng.levels[0]
+
+    for note in level.notes:
+        pi_idx = bisect.bisect_right(pi_times, note.time) - 1
+        pi_idx = max(0, min(pi_idx, num_pi - 1))
+        note.phraseIterationId = pi_idx
+        note.phraseId = sng.phraseIterations[pi_idx].phraseId
+
+    pi_note_groups: dict[int, list[int]] = {}
+    for note_idx, note in enumerate(level.notes):
+        pi_note_groups.setdefault(note.phraseIterationId, []).append(note_idx)
+
+    for group_indices in pi_note_groups.values():
+        for i, ni in enumerate(group_indices):
+            level.notes[ni].prevIterNote = (
+                group_indices[i - 1] if i > 0 else SENTINEL
+            )
+            level.notes[ni].nextIterNote = (
+                group_indices[i + 1] if i < len(group_indices) - 1 else SENTINEL
+            )
+
+    for anchor in level.anchors:
+        pi_idx = bisect.bisect_right(pi_times, anchor.time) - 1
+        anchor.phraseIterationId = max(0, min(pi_idx, num_pi - 1))
+
+    # averageNotesPerIter (per phraseId)
+    phrase_note_counts: dict[int, list[int]] = {}
+    for pi_idx, note_indices in pi_note_groups.items():
+        phrase_id = sng.phraseIterations[pi_idx].phraseId
+        phrase_note_counts.setdefault(phrase_id, []).append(len(note_indices))
+
+    avg = ListContainer()
+    for pid in range(num_phrases):
+        counts = phrase_note_counts.get(pid, [0])
+        avg.append(sum(counts) / len(counts) if counts else 0.0)
+    level.averageNotesPerIter = avg
+
+    # notesInIterCount / notesInIterCountNoIgnored (per PI index)
+    iter_counts = ListContainer()
+    iter_counts_no_ignored = ListContainer()
+    for pi_idx in range(num_pi):
+        n = len(pi_note_groups.get(pi_idx, []))
+        iter_counts.append(n)
+        iter_counts_no_ignored.append(n)
+    level.notesInIterCount = iter_counts
+    level.notesInIterCountNoIgnored = iter_counts_no_ignored
 
     return Song.build(sng)
 
@@ -729,7 +832,144 @@ def rebuild_manifest(
 
 
 # ---------------------------------------------------------------------------
-# Top-level orchestrator
+# PSARC repair orchestrator
+# ---------------------------------------------------------------------------
+
+def _extract_boundaries(sng: Container) -> list[SegmentBoundary]:
+    """Extract SegmentBoundary list from an existing SNG's sections.
+
+    Returns the same format as determine_boundaries(): COUNT at 0,
+    one boundary per section, END at songLength.
+    """
+    boundaries = [SegmentBoundary(time=0.0, name="COUNT", number=1)]
+    for sec in sng.sections:
+        boundaries.append(SegmentBoundary(
+            time=sec.startTime,
+            name=sec.name,
+            number=sec.number,
+        ))
+    boundaries.append(SegmentBoundary(
+        time=sng.metadata.songLength,
+        name="END",
+        number=1,
+    ))
+    return boundaries
+
+
+def repair_psarc(
+    psarc_path: Path,
+    output_path: Path,
+    dry_run: bool = False,
+) -> "ValidationReport":
+    """Fix broken CDLC by flattening to single max-difficulty level.
+
+    Strips DD, keeps only the level with the most notes, sets all
+    maxDifficulty=0, and recomputes derived fields.  For cross-arrangement
+    section mismatches, uses bass SNG sections as canonical.
+
+    XML and manifest are left untouched (no phrase reordering).
+
+    Returns the post-repair ValidationReport.
+    """
+    from .validate import validate_psarc, ValidationReport
+
+    with open(psarc_path, "rb") as f:
+        content = PSARC(crypto=True).parse_stream(f)
+
+    # Find bass SNG — canonical source for section structure
+    bass_key = _find_bass_sng_key(content)
+    if bass_key is None:
+        raise ValueError("No bass SNG found in PSARC")
+
+    bass_sng = Song.parse(content[bass_key])
+    if not bass_sng.sections:
+        raise ValueError("Bass SNG has no sections")
+
+    canonical_boundaries = _extract_boundaries(bass_sng)
+    bass_section_count = len(bass_sng.sections)
+    log.info("Canonical: %d sections from bass", bass_section_count)
+
+    # Process each arrangement SNG
+    sng_keys = [
+        k for k in content
+        if ("songs/bin/generic/" in k or "songs/bin/macos/" in k)
+        and k.endswith(".sng")
+    ]
+
+    had_section_mismatch = False
+    for key in sng_keys:
+        short = key.split("/")[-1]
+        try:
+            arr_sng = Song.parse(content[key])
+        except Exception as e:
+            log.warning("Failed to parse SNG %s: %s", short, e)
+            continue
+
+        if not arr_sng.sections:
+            # Vocals — no sections, skip
+            continue
+
+        if len(arr_sng.sections) != bass_section_count:
+            # Cross-arrangement mismatch — full rebuild with bass boundaries,
+            # then flatten the result
+            log.info("Rebuilding %s: %d sections -> %d (match bass)",
+                     short, len(arr_sng.sections), bass_section_count)
+            rebuilt_bytes = rebuild_sng(arr_sng, canonical_boundaries)
+            rebuilt_sng = Song.parse(rebuilt_bytes)
+            content[key] = flatten_sng(rebuilt_sng)
+            had_section_mismatch = True
+        else:
+            log.info("Flattening %s: %d levels -> 1", short, len(arr_sng.levels))
+            content[key] = flatten_sng(arr_sng)
+
+    # Only rebuild XML/manifest if section structure actually changed
+    if had_section_mismatch:
+        for key in list(content.keys()):
+            if key.startswith("songs/arr/") and key.endswith(".xml"):
+                try:
+                    xml_text = content[key].decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                if "<sections" in xml_text:
+                    content[key] = rebuild_xml(content[key], canonical_boundaries)
+                    log.info("Rebuilt XML: %s", key)
+
+        for key in list(content.keys()):
+            if key.startswith("manifests/") and key.endswith(".json"):
+                try:
+                    manifest = json.loads(content[key])
+                    has_sections = any(
+                        entry.get("Attributes", {}).get("Sections")
+                        for entry in manifest.get("Entries", {}).values()
+                    )
+                    if has_sections:
+                        content[key] = rebuild_manifest(content[key], canonical_boundaries)
+                        log.info("Rebuilt manifest: %s", key)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+
+    if dry_run:
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".psarc", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+            PSARC(crypto=True).build_stream(content, tmp)
+        try:
+            report = validate_psarc(tmp_path)
+            report.path = psarc_path
+        finally:
+            tmp_path.unlink()
+        return report
+
+    # Write output PSARC
+    with open(output_path, "wb") as f:
+        PSARC(crypto=True).build_stream(content, f)
+    log.info("Wrote: %s", output_path)
+
+    return validate_psarc(output_path)
+
+
+# ---------------------------------------------------------------------------
+# Top-level reslice orchestrator
 # ---------------------------------------------------------------------------
 
 def reslice_psarc(
