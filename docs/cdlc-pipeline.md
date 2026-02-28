@@ -100,54 +100,48 @@ rocksmith-tutor scan
 
 ### Strategy: 100% difficulty, no DD
 
-All CDLC is flattened to a single max-difficulty level. Dynamic Difficulty (DD) is
-stripped entirely — the game always shows all notes at 100%. Use Riff Repeater speed
-control to slow down hard sections instead of DD's note-hiding approach.
+Bass is flattened to 100% difficulty — DD notes from all levels are composited into
+a single level so every note is always visible. Use Riff Repeater speed control to
+slow down hard sections instead of DD's note-hiding approach. Only the bass SNG is
+modified; lead, rhythm, vocals, XML, and manifest are untouched.
 
-This eliminates the entire class of DD-related corruption (`notesInIterCount` mismatch,
-multi-level coverage bugs, stale `phraseId` references) that affects 54%+ of the CDLC
-library.
+### Repair → Reslice → Deploy
 
-### Validate → Repair → Deploy
+**Order matters: repair (flatten) before reslice.** Reslice rebuilds the SNG phrase
+structure, which breaks DD level data. Flatten first to composite all notes into one
+level, then reslice to get good phrase boundaries.
 
 ```bash
-# 1. Validate a file
-rocksmith-tutor validate ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_m.psarc
-
-# 2. Repair (flattens DD, recomputes derived fields)
-#    Output goes next to the input as {stem}_repaired{suffix}
+# 1. Repair (flatten bass DD to 100%)
 rocksmith-tutor repair ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_m.psarc
 
+# 2. Reslice (note-gap-driven phrase boundaries, 3-15s segments)
+rocksmith-tutor reslice --file ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_repaired_m.psarc \
+    -o ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_final_m.psarc
+
 # 3. Deploy to Mac
-scp ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_repaired_m.psarc \
-    'rocksmithytoo:"~/Library/Application Support/Steam/steamapps/common/Rocksmith2014/dlc/"'
+scp ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_final_m.psarc \
+    'rocksmithytoo:"/Users/ahonnecke/Library/Application Support/Steam/steamapps/common/Rocksmith2014/dlc/"'
 
 # 4. Move to live on NAS once verified in-game
-mv ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_repaired_m.psarc \
+mv ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_final_m.psarc \
    ~/nasty/music/Rocksmith_CDLC/live/
-
-# Dry run — validate before/after without writing
-rocksmith-tutor repair --dry-run ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_m.psarc
 ```
 
-### Batch repair
+### Repair only (skip reslice)
+
+If the existing phrase boundaries are fine and you just want 100% difficulty:
 
 ```bash
-# Validate everything in staging
-for f in ~/nasty/music/Rocksmith_CDLC/staging/*_m.psarc; do
-  rocksmith-tutor validate "$f"
-done
+rocksmith-tutor repair ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_m.psarc
+```
 
-# Repair all failing files
+### Batch
+
+```bash
 for f in ~/nasty/music/Rocksmith_CDLC/staging/*_m.psarc; do
   rocksmith-tutor repair "$f"
+  rocksmith-tutor reslice --file "${f%_m.psarc}_repaired_m.psarc" \
+      -o "${f%_m.psarc}_final_m.psarc"
 done
-```
-
-### Reslice (re-segment boundaries)
-
-When a file needs completely new phrase/section structure (not just accounting fixes):
-
-```bash
-rocksmith-tutor reslice ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_m.psarc
 ```

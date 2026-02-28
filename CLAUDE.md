@@ -20,19 +20,23 @@ rocksmithytoo is a Mac (SSH host configured in ~/.ssh/config). Rocksmith DLC dir
 ```
 
 ```bash
-# Repair a PSARC (outputs next to input as {stem}_repaired{suffix})
+# 1. Repair (flatten bass DD to 100%)
 rocksmith-tutor repair ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_m.psarc
 
-# Deploy to Mac
-scp ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_repaired_m.psarc \
-    'rocksmithytoo:"~/Library/Application Support/Steam/steamapps/common/Rocksmith2014/dlc/"'
+# 2. Reslice (small, music-matching phrases — repair MUST come first)
+rocksmith-tutor reslice --file ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_repaired_m.psarc \
+    -o ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_final_m.psarc
 
-# Move to live on NAS once verified
-mv ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_repaired_m.psarc ~/nasty/music/Rocksmith_CDLC/live/
+# 3. Deploy to Mac
+scp ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_final_m.psarc \
+    'rocksmithytoo:"/Users/ahonnecke/Library/Application Support/Steam/steamapps/common/Rocksmith2014/dlc/"'
+
+# 4. Move to live on NAS once verified
+mv ~/nasty/music/Rocksmith_CDLC/staging/SomeFile_final_m.psarc ~/nasty/music/Rocksmith_CDLC/live/
 ```
 
 ## Repair strategy: 100% difficulty, no DD
 
-All CDLC is flattened to a single max-difficulty level. Dynamic Difficulty (DD) is stripped — the game always shows all notes at 100%. Use Riff Repeater speed control to slow down hard sections instead of DD's note-hiding approach. This eliminates the entire class of DD-related corruption (broken `notesInIterCount`, multi-level coverage bugs) that affects 54% of the CDLC library.
+Bass is flattened to 100% — DD notes from all levels are composited into a single level. Only the bass SNG is modified; lead/rhythm/vocals/XML/manifest untouched. Order matters: **repair before reslice** (reslice breaks DD level data).
 
 See [docs/cdlc-pipeline.md](docs/cdlc-pipeline.md) for the full pipeline.
