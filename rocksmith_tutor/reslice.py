@@ -555,28 +555,29 @@ def flatten_sng(sng: Container) -> bytes:
     if not sng.levels:
         return Song.build(sng)
 
-    # Pick the level with the most notes that still covers the full song.
-    # Higher DD levels have more notes but may only cover a subset of PIs
-    # (dense sections only). Among levels covering >= 80% of PIs, pick the
-    # one with the most notes (highest difficulty with full coverage).
+    # Composite: for each PI, pull notes from levels[phrase.maxDifficulty].
+    # DD spreads notes across levels — no single level has all of them.
     pi_times = [pi.time for pi in sng.phraseIterations]
-    num_pi = len(sng.phraseIterations)
+    num_pi = len(pi_times)
 
-    def _pi_coverage(level):
-        pis_hit = set()
-        for n in level.notes:
-            idx = bisect.bisect_right(pi_times, n.time) - 1
-            pis_hit.add(max(0, min(idx, num_pi - 1)))
-        return len(pis_hit)
+    # Use level 0 as the base (has anchors, handshapes, etc. for full song)
+    base = sng.levels[0]
+    composite_notes = ListContainer()
 
-    max_coverage = max(_pi_coverage(l) for l in sng.levels)
-    threshold = max(1, int(max_coverage * 0.8))
-    full_coverage_levels = [l for l in sng.levels if _pi_coverage(l) >= threshold]
-    best = max(full_coverage_levels, key=lambda l: len(l.notes))
-    best.difficulty = 0
+    for pi_idx, pi in enumerate(sng.phraseIterations):
+        end = pi_times[pi_idx + 1] if pi_idx + 1 < num_pi else sng.metadata.songLength
+        max_d = min(sng.phrases[pi.phraseId].maxDifficulty, len(sng.levels) - 1)
+        source = sng.levels[max_d]
+        for n in source.notes:
+            if pi.time <= n.time < end:
+                composite_notes.append(n)
 
-    # Replace levels with just the one
-    sng.levels = ListContainer([best])
+    composite_notes.sort(key=lambda n: n.time)
+    base.notes = composite_notes
+    base.difficulty = 0
+
+    # Replace levels with just the composite
+    sng.levels = ListContainer([base])
 
     # Set all phrases to maxDifficulty=0
     for p in sng.phrases:
@@ -951,32 +952,22 @@ def reslice_psarc(
     log.info("Parsed SNG: %d phrases, %d phraseIterations, %d sections",
              len(sng.phrases), len(sng.phraseIterations), len(sng.sections))
 
-    # Get notes from the best level for gap analysis.
-    # For DD songs, the global max level may only contain notes for
-    # the highest-maxDifficulty phrases.  We want the highest level
-    # that still covers ALL non-ignored phrase iterations.
+    # Build composite notes for gap analysis: for each PI, take notes from
+    # levels[phrase.maxDifficulty].  No single DD level has all the notes.
     if not sng.levels:
         raise ValueError("No levels found in SNG")
 
-    ignored_pi = {
-        i for i, pi in enumerate(sng.phraseIterations)
-        if sng.phrases[pi.phraseId].ignore
-    }
-    target_pis = set(range(len(sng.phraseIterations))) - ignored_pi
-
-    best_level = None
-    for lv in sorted(sng.levels, key=lambda l: l.difficulty, reverse=True):
-        covered = {n.phraseIterationId for n in lv.notes}
-        if target_pis <= covered:
-            best_level = lv
-            break
-
-    if best_level is None:
-        # Fallback: level with the most notes
-        best_level = max(sng.levels, key=lambda l: len(l.notes))
-
-    notes = list(best_level.notes)
-    log.info("Analysis level (%d): %d notes", best_level.difficulty, len(notes))
+    pi_times = [pi.time for pi in sng.phraseIterations]
+    num_pi = len(pi_times)
+    notes = []
+    for pi_idx, pi in enumerate(sng.phraseIterations):
+        end = pi_times[pi_idx + 1] if pi_idx + 1 < num_pi else sng.metadata.songLength
+        max_d = min(sng.phrases[pi.phraseId].maxDifficulty, len(sng.levels) - 1)
+        for n in sng.levels[max_d].notes:
+            if pi.time <= n.time < end:
+                notes.append(n)
+    notes.sort(key=lambda n: n.time)
+    log.info("Composite analysis notes: %d", len(notes))
 
     # Determine boundaries from note gaps
     song_length = sng.metadata.songLength
