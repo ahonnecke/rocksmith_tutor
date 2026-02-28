@@ -15,9 +15,13 @@ Deploy a resliced PSARC:
 scp /tmp/my_resliced.psarc 'rocksmithytoo:"~/Library/Application Support/Steam/steamapps/common/Rocksmith2014/dlc/"'
 ```
 
-## CDLC library (local)
+## CDLC library (NAS)
 
 ```
-~/nasty/music/Rocksmith_CDLC/verified/
-~/nasty/music/Rocksmith_CDLC/unverified/
+~/nasty/music/Rocksmith_CDLC/
+├── live/           # Verified, game-ready — rocksmithytoo mounts via NFS
+├── staging/        # New downloads awaiting play-test
+└── quarantine/     # Files that crashed the game
 ```
+
+See [docs/cdlc-pipeline.md](docs/cdlc-pipeline.md) for the full pipeline.

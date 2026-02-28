@@ -26,8 +26,8 @@ if platform.system() == "Darwin":
 else:
     _STEAM_USERDATA = Path.home() / ".local" / "share" / "Steam" / "userdata"
     DEFAULT_PSARC_DIRS = [
-        Path.home() / "nasty" / "music" / "Rocksmith_CDLC" / "verified",
-        Path.home() / "nasty" / "music" / "Rocksmith_CDLC" / "unverified",
+        Path.home() / "nasty" / "music" / "Rocksmith_CDLC" / "live",
+        Path.home() / "nasty" / "music" / "Rocksmith_CDLC" / "staging",
     ]
 
 DEFAULT_MODEL = "claude-sonnet-4-20250514"

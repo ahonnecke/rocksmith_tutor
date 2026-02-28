@@ -49,7 +49,18 @@ rocksmith-tutor catalog --sort difficulty
 rocksmith-tutor scan
 ```
 
-Then tell the Linux box to pull the updated catalog and regenerate.
+## CDLC Pipeline
+
+New CDLC files flow through a staging/live/quarantine pipeline on the NAS.
+See [docs/cdlc-pipeline.md](docs/cdlc-pipeline.md) for the full architecture.
+
+```bash
+# Check what's waiting to be promoted
+wayward-promote --list
+
+# Promote to live (immediately visible to Rocksmith)
+wayward-promote --all
+```
 
 ## Curriculum generation (Linux box only)
 
