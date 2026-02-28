@@ -555,8 +555,24 @@ def flatten_sng(sng: Container) -> bytes:
     if not sng.levels:
         return Song.build(sng)
 
-    # Pick the level with the most notes (highest difficulty, full note set)
-    best = max(sng.levels, key=lambda l: len(l.notes))
+    # Pick the level with the most notes that still covers the full song.
+    # Higher DD levels have more notes but may only cover a subset of PIs
+    # (dense sections only). Among levels covering >= 80% of PIs, pick the
+    # one with the most notes (highest difficulty with full coverage).
+    pi_times = [pi.time for pi in sng.phraseIterations]
+    num_pi = len(sng.phraseIterations)
+
+    def _pi_coverage(level):
+        pis_hit = set()
+        for n in level.notes:
+            idx = bisect.bisect_right(pi_times, n.time) - 1
+            pis_hit.add(max(0, min(idx, num_pi - 1)))
+        return len(pis_hit)
+
+    max_coverage = max(_pi_coverage(l) for l in sng.levels)
+    threshold = max(1, int(max_coverage * 0.8))
+    full_coverage_levels = [l for l in sng.levels if _pi_coverage(l) >= threshold]
+    best = max(full_coverage_levels, key=lambda l: len(l.notes))
     best.difficulty = 0
 
     # Replace levels with just the one
