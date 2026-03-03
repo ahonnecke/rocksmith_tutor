@@ -75,16 +75,69 @@ def _compute_note_gaps(notes: list) -> list[NoteGap]:
     return gaps
 
 
-def _score_gaps(gaps: list[NoteGap], beats: list) -> None:
-    """Score each gap using local-median ratio + beat-alignment bonus.
+def _note_complexity(notes: list) -> float:
+    """Compute complexity score for a group of notes.
+
+    Measures variety: unique (string, fret) positions × unique transitions,
+    normalized by note count.  A repeating root-note pattern scores low;
+    a riff using multiple strings and frets scores high.
+    """
+    if len(notes) < 2:
+        return 0.0
+    positions = set((n.string, n.fret) for n in notes)
+    transitions = set()
+    for i in range(len(notes) - 1):
+        a, b = notes[i], notes[i + 1]
+        transitions.add((b.string - a.string, b.fret - a.fret))
+    return len(positions) * len(transitions) / len(notes)
+
+
+def _score_gaps(gaps: list[NoteGap], beats: list, notes: list | None = None) -> None:
+    """Score each gap using local-median ratio + beat-alignment + complexity change.
 
     Mutates gaps in place, setting .score and .snap_target.
+
+    The complexity bonus detects transitions between simple repeating patterns
+    and complex riffs (more strings, more pitch variety).  Gaps where the
+    musical character changes get higher scores, making the greedy splitter
+    prefer them as boundary points.
     """
     if not gaps:
         return
 
     # Pre-compute measure-start times for beat bonus
     measure_times = sorted(b.time for b in beats if b.beat == 0)
+
+    # Pre-compute complexity change at each gap position
+    complexity_bonus: list[float] = [1.0] * len(gaps)
+    if notes and len(notes) >= 4:
+        note_times = [n.time for n in notes]
+        window = 4.0  # seconds of context on each side
+
+        for i, gap in enumerate(gaps):
+            t = gap.midpoint
+            # Notes in [t - window, t)
+            lo_idx = bisect.bisect_left(note_times, t - window)
+            mid_idx = bisect.bisect_right(note_times, t)
+            hi_idx = bisect.bisect_right(note_times, t + window)
+
+            before = notes[lo_idx:mid_idx]
+            after = notes[mid_idx:hi_idx]
+
+            if len(before) >= 2 and len(after) >= 2:
+                c_before = _note_complexity(before)
+                c_after = _note_complexity(after)
+                # Ratio of change — high when complexity spikes or drops
+                if c_before > 0:
+                    ratio = max(c_after / c_before, c_before / c_after)
+                elif c_after > 0:
+                    ratio = c_after + 1.0
+                else:
+                    ratio = 1.0
+                # Boost gaps at complexity transitions (≥2x change → bonus)
+                # Cap at 2x to avoid cascade-splitting in the greedy pass
+                if ratio >= 2.0:
+                    complexity_bonus[i] = 1.0 + min(ratio - 1.0, 1.0)
 
     half_window = 10  # ~20 surrounding gaps
 
@@ -111,6 +164,9 @@ def _score_gaps(gaps: list[NoteGap], beats: list) -> None:
             if gap.start <= measure_times[j] <= gap.end:
                 gap.score *= 1.5
                 break
+
+        # Complexity change bonus
+        gap.score *= complexity_bonus[i]
 
         # Snap midpoint to nearest beat
         gap.snap_target = _snap_to_beat(gap.midpoint, beats)
@@ -242,7 +298,7 @@ def determine_boundaries(
 
     # --- Step 1-2: compute and score gaps ---
     gaps = _compute_note_gaps(notes)
-    _score_gaps(gaps, beats)
+    _score_gaps(gaps, beats, notes)
 
     # --- Step 3: iteratively split the longest span using highest-scored gap ---
     selected_times: list[float] = []
@@ -286,6 +342,64 @@ def determine_boundaries(
                 # Force it in even if min_segment is tight
                 selected_times.append(t)
                 break  # avoid infinite loop
+
+    # --- Step 4: split at complexity transitions within existing segments ---
+    # Even if a segment is under max_segment, split it when the musical
+    # character changes significantly (e.g. simple repeating pattern → complex
+    # riff).  Only split segments that are long enough to benefit; skip
+    # segments already near min_segment.
+    complexity_min_span = max(min_segment * 2.5, 8.0)  # don't split short segs
+    note_times = [n.time for n in notes]
+    for _ in range(50):  # safety bound
+        bounds = _all_bounds()
+        split_made = False
+        for i in range(len(bounds) - 1):
+            seg_lo, seg_hi = bounds[i], bounds[i + 1]
+            span = seg_hi - seg_lo
+            if span < complexity_min_span:
+                continue
+
+            # Find notes in this segment
+            lo_idx = bisect.bisect_left(note_times, seg_lo)
+            hi_idx = bisect.bisect_right(note_times, seg_hi)
+            seg_notes = notes[lo_idx:hi_idx]
+            if len(seg_notes) < 10:
+                continue
+
+            # Find the point of maximum complexity change within the segment.
+            # Use 8-note windows on each side for stable measurement.
+            best_ratio = 1.0
+            best_gap_t = None
+            step = max(1, len(seg_notes) // 20)
+            for j in range(4, len(seg_notes) - 4, step):
+                before = seg_notes[max(0, j - 8):j]
+                after = seg_notes[j:min(len(seg_notes), j + 8)]
+                if len(before) < 3 or len(after) < 3:
+                    continue
+                c_b = _note_complexity(before)
+                c_a = _note_complexity(after)
+                if c_b > 0:
+                    ratio = max(c_a / c_b, c_b / c_a)
+                elif c_a > 0:
+                    ratio = c_a + 1.0
+                else:
+                    continue
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_gap_t = seg_notes[j].time
+
+            # Only split if complexity change is substantial (≥3x)
+            if best_ratio >= 3.0 and best_gap_t is not None:
+                # Find the best gap near the complexity transition
+                search_lo = max(seg_lo, best_gap_t - 2.0)
+                search_hi = min(seg_hi, best_gap_t + 2.0)
+                best = _best_gap_in_range(gaps, search_lo, search_hi)
+                if best is not None and _respects_min(best.snap_target):
+                    selected_times.append(best.snap_target)
+                    split_made = True
+                    break  # restart scan with updated bounds
+        if not split_made:
+            break
 
     # --- Merge manual splits ---
     if manual_splits:
