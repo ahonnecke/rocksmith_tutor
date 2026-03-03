@@ -407,10 +407,25 @@ def rebuild_sng(sng: Container, boundaries: list[SegmentBoundary]) -> bytes:
             unique_phrases[name] = len(new_phrases)
             max_diff = name_max_diff.get(name, 0)
 
+            # COUNT/END are normally ignored (not scored, skipped by
+            # Riff Repeater).  But if COUNT has notes, mark it playable
+            # so Riff Repeater can reach it.
+            if name == "END":
+                ignore = 1
+            elif name == "COUNT" and len(non_end) > 1:
+                count_end = non_end[1].time
+                has_notes = any(
+                    any(n.time < count_end for n in lv.notes)
+                    for lv in sng.levels
+                )
+                ignore = 0 if has_notes else 1
+            else:
+                ignore = 0
+
             new_phrases.append(Container(
                 solo=0,
                 disparity=0,
-                ignore=1 if name in ("COUNT", "END") else 0,
+                ignore=ignore,
                 maxDifficulty=max_diff,
                 phraseIterationLinks=0,  # recomputed below
                 name=name,
@@ -438,14 +453,18 @@ def rebuild_sng(sng: Container, boundaries: list[SegmentBoundary]) -> bytes:
     for pi in new_pi:
         new_phrases[pi.phraseId].phraseIterationLinks += 1
 
-    # --- 3. Build new sections (1:1 with PIs, excluding COUNT PI at index 0) ---
+    # --- 3. Build new sections (1:1 with PIs) ---
+    # Include COUNT PI as "intro" section so notes in the pre-song region
+    # are reachable in Riff Repeater.
     new_sections = ListContainer()
     section_name_counts: dict[str, int] = {}
-    for pi_idx in range(1, len(new_pi)):
+    for pi_idx in range(len(new_pi)):
         pi = new_pi[pi_idx]
         name = new_phrases[pi.phraseId].name
         if name == "END":
             continue
+        if name == "COUNT":
+            name = "intro"
         section_name_counts[name] = section_name_counts.get(name, 0) + 1
 
         new_sections.append(Container(
@@ -718,9 +737,11 @@ def rebuild_xml(xml_bytes: bytes, boundaries: list[SegmentBoundary]) -> bytes:
     # --- Generate <sections> block ---
     section_entries = []
     for b in boundaries:
-        if b.name in ("COUNT", "END"):
+        if b.name == "END":
             continue
-        section_entries.append((b.name, b.number, b.time))
+        name = "intro" if b.name == "COUNT" else b.name
+        number = 1 if b.name == "COUNT" else b.number
+        section_entries.append((name, number, b.time))
     sec_lines = [f'  <sections count="{len(section_entries)}">']
     for name, number, start in section_entries:
         sec_lines.append(f'    <section name="{name}" number="{number}" startTime="{start:.3f}"/>')
@@ -828,14 +849,13 @@ def rebuild_manifest(
         new_sections = []
         section_name_counts: dict[str, int] = {}
         for i, b in enumerate(non_end):
-            if b.name == "COUNT":
-                continue
+            name = "intro" if b.name == "COUNT" else b.name
             end_time = non_end[i + 1].time if i + 1 < len(non_end) else b.time
-            section_name_counts[b.name] = section_name_counts.get(b.name, 0) + 1
-            num = section_name_counts[b.name]
+            section_name_counts[name] = section_name_counts.get(name, 0) + 1
+            num = section_name_counts[name]
             new_sections.append({
-                "Name": b.name,
-                "UIName": _ui_name(b.name, num),
+                "Name": name,
+                "UIName": _ui_name(name, num),
                 "Number": num,
                 "StartTime": round(b.time, 3),
                 "EndTime": round(end_time, 3),
